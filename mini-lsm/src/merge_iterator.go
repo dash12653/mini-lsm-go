@@ -8,23 +8,26 @@ import (
 
 // MergeIterator implements StorageIterator by merging multiple MemTableIterators
 type MergeIterator struct {
-	iters        []*MemTableIteratorWithBounds // List of iterators, iters[0] is the newest MemTable
-	minHeap      iteratorHeap                  // Min-heap to keep track of the smallest current keys among iterators
-	currentKey   []byte                        // Current key that the iterator points to
-	currentValue []byte                        // Current value that the iterator points to
-	valid        bool                          // Whether the iterator currently points to a valid key-value pair
+	iters        []*BoundedMemTableIterator // List of iterators, iters[0] is the newest MemTable
+	minHeap      iteratorHeap               // Min-heap to keep track of the smallest current keys among iterators
+	currentKey   []byte                     // Current key that the iterator points to
+	currentValue []byte                     // Current value that the iterator points to
+	valid        bool                       // Whether the iterator currently points to a valid key-value pair
+	lastKey      []byte
 }
 
 // heapItem represents an item in the min-heap
 type heapItem struct {
-	iter  *MemTableIteratorWithBounds // The iterator this item belongs to
-	index int                         // Index of the iterator to resolve conflicts (lower index means newer data)
+	iter  *BoundedMemTableIterator // The iterator this item belongs to
+	index int                      // Index of the iterator to resolve conflicts (lower index means newer data)
 }
 
 // iteratorHeap implements a min-heap over heapItems
 type iteratorHeap []heapItem
 
-func (h iteratorHeap) Len() int { return len(h) }
+func (h iteratorHeap) Len() int {
+	return len(h)
+}
 
 // Less defines the ordering rule of the heap:
 // - First compare keys lexicographically
@@ -56,7 +59,7 @@ func (h *iteratorHeap) Pop() interface{} {
 
 // NewMergeIteratorFromBoundIterators creates a new MergeIterator from a slice of MemTableIterators.
 // Assumes that iters[0] is the newest MemTable (highest priority).
-func NewMergeIteratorFromBoundIterators(iters []*MemTableIteratorWithBounds) *MergeIterator {
+func NewMergeIteratorFromBoundIterators(iters []*BoundedMemTableIterator) *MergeIterator {
 	h := make(iteratorHeap, 0, len(iters))
 	for i, it := range iters {
 		if it.Valid() {
@@ -72,30 +75,11 @@ func NewMergeIteratorFromBoundIterators(iters []*MemTableIteratorWithBounds) *Me
 	return mi
 }
 
-// NewMergeIterator creates a new MergeIterator from a slice of MemTableIterators.
-// Assumes that iters[0] is the newest MemTable (highest priority).
-//func NewMergeIterator(iters []*MemTableIterator) *MergeIterator {
-//	h := make(iteratorHeap, 0, len(iters))
-//	for i, it := range iters {
-//		if it.Valid() {
-//			h = append(h, heapItem{iter: it, index: i})
-//		}
-//	}
-//	heap.Init(&h)
-//	mi := &MergeIterator{
-//		iters:   iters,
-//		minHeap: h,
-//	}
-//	mi.advance() // Initialize the iterator to point to the first valid key-value pair
-//	return mi
-//}
-
 // advance moves the iterator forward to the next valid key-value pair.
 // It skips keys that are logically deleted (empty value) and
 // ensures only the latest version of each key is returned.
 func (mi *MergeIterator) advance() {
 	mi.valid = false
-	var lastKey []byte
 
 	for len(mi.minHeap) > 0 {
 		item := heap.Pop(&mi.minHeap).(heapItem)
@@ -113,7 +97,7 @@ func (mi *MergeIterator) advance() {
 		}
 
 		// Skip duplicate keys to only return the newest version
-		if lastKey != nil && bytes.Equal(key, lastKey) {
+		if mi.lastKey != nil && bytes.Equal(key, mi.lastKey) {
 			err := it.Next()
 			if err == nil && it.Valid() {
 				heap.Push(&mi.minHeap, heapItem{iter: it, index: item.index})
@@ -125,7 +109,7 @@ func (mi *MergeIterator) advance() {
 		mi.currentKey = key
 		mi.currentValue = val
 		mi.valid = true
-		lastKey = key
+		mi.lastKey = key
 
 		// Advance the iterator for the current item to prepare for next call
 		err := it.Next()

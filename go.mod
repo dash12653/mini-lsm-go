@@ -2,6 +2,11 @@ module mini-lsm-go
 
 go 1.23.1
 
-require github.com/MauriceGit/skiplist v0.0.0-20211105230623-77f5c8d3e145
+require github.com/stretchr/testify v1.4.0
 
-require github.com/huandu/skiplist v1.2.1 // indirect
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/huandu/skiplist v1.2.1
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	gopkg.in/yaml.v2 v2.2.2 // indirect
+)

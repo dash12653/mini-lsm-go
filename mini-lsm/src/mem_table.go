@@ -2,65 +2,9 @@ package src
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
 	"github.com/huandu/skiplist"
 )
-
-type StorageIterator interface {
-	Key() []byte
-	Value() []byte
-	Next() error
-	Valid() bool
-}
-
-type MemTableIteratorWithBounds struct {
-	*MemTableIterator
-	upper []byte
-}
-
-func (it *MemTableIteratorWithBounds) Valid() bool {
-	if !it.MemTableIterator.Valid() {
-		return false
-	}
-	if it.upper == nil {
-		return true
-	}
-	return bytes.Compare(it.Key(), it.upper) < 0
-}
-
-func (it *MemTableIteratorWithBounds) Next() error {
-	err := it.MemTableIterator.Next()
-	if err != nil {
-		return err
-	}
-	if !it.Valid() {
-		// 超过上界，直接置空 node，迭代器失效
-		it.node = nil
-	}
-	return nil
-}
-
-func (it *MemTableIteratorWithBounds) Key() []byte {
-	if !it.Valid() {
-		return nil
-	}
-	return it.MemTableIterator.Key()
-}
-
-func (it *MemTableIteratorWithBounds) Value() []byte {
-	if !it.Valid() {
-		return nil
-	}
-	return it.MemTableIterator.Value()
-}
-
-func (mt *MemTable) Scan(lower []byte, upper []byte) *MemTableIteratorWithBounds {
-	it := NewMemTableIterator(mt, lower)
-	return &MemTableIteratorWithBounds{
-		MemTableIterator: it,
-		upper:            upper,
-	}
-}
 
 // MemTable wrapper of skip list
 type MemTable struct {
@@ -78,7 +22,7 @@ func (c *ByteSliceComparator) Compare(lhs, rhs interface{}) int {
 }
 
 func (c *ByteSliceComparator) CalcScore(key interface{}) float64 {
-	// 用 key 的长度作为分数
+	// use key's length as score
 	k := key.([]byte)
 	return float64(len(k))
 }
@@ -95,7 +39,7 @@ func (mt *MemTable) Put(key []byte, value []byte) {
 	mt.Map.Set(key, value)
 }
 
-// 获取 Key 对应的 Value
+// Get gets key's corresponding value
 func (mt *MemTable) Get(key []byte) []byte {
 	return mt.Map.Get(key).Value.([]byte)
 }
@@ -104,46 +48,78 @@ func (mt *MemTable) Len() uint64 {
 	return mt.ApproximateSize
 }
 
-type MemTableIterator struct {
-	list *skiplist.SkipList // 持有 MemTable 的引用
-	node *skiplist.Element  // 当前迭代位置
+type StorageIterator interface {
+	Key() []byte
+	Value() []byte
+	Next() error
+	Valid() bool
 }
 
-// NewMemTableIterator creates a new iterator starting from the smallest key >= start
-func NewMemTableIterator(table *MemTable, startKey []byte) *MemTableIterator {
-	node := table.Map.Find(startKey)
-	return &MemTableIterator{
-		list: table.Map,
-		node: node,
+// Unified iterator with optional lower/upper bounds
+type BoundedMemTableIterator struct {
+	list       *skiplist.SkipList
+	node       *skiplist.Element
+	upperBound []byte
+	valid      bool
+}
+
+// NewBoundedMemTableIterator creates an iterator starting at `start` and bounded by `upper`.
+// If upper is nil, it's unbounded above. If start is nil, it starts from the beginning.
+func NewBoundedMemTableIterator(mt *MemTable, start []byte, upper []byte) *BoundedMemTableIterator {
+	var node *skiplist.Element
+	if start == nil {
+		node = mt.Map.Front()
+	} else {
+		node = mt.Map.Find(start)
 	}
-}
 
-// Valid returns whether the iterator is at a valid position
-func (it *MemTableIterator) Valid() bool {
-	return it.node != nil
-}
-
-// Key returns the key at the current iterator position
-func (it *MemTableIterator) Key() []byte {
-	if it.Valid() {
-		return it.node.Key().([]byte)
+	iter := &BoundedMemTableIterator{
+		list:       mt.Map,
+		node:       node,
+		upperBound: upper,
+		valid:      node != nil,
 	}
-	return nil
-}
-
-// Value returns the value at the current iterator position
-func (it *MemTableIterator) Value() []byte {
-	if it.Valid() {
-		return it.node.Value.([]byte)
+	if iter.valid && upper != nil && bytes.Compare(iter.Key(), upper) >= 0 {
+		iter.valid = false
+		iter.node = nil
 	}
-	return nil
+	return iter
 }
 
-// Next advances the iterator to the next position
-func (it *MemTableIterator) Next() error {
-	if !it.Valid() {
-		return fmt.Errorf("iterator is not valid")
+func (it *BoundedMemTableIterator) Valid() bool {
+	return it.valid
+}
+
+func (it *BoundedMemTableIterator) Key() []byte {
+	if !it.valid {
+		return nil
+	}
+	return it.node.Key().([]byte)
+}
+
+func (it *BoundedMemTableIterator) Value() []byte {
+	if !it.valid {
+		return nil
+	}
+	return it.node.Value.([]byte)
+}
+
+func (it *BoundedMemTableIterator) Next() error {
+	if !it.valid {
+		return errors.New("iterator is not valid")
 	}
 	it.node = it.node.Next()
+	if it.node == nil {
+		it.valid = false
+		return nil
+	}
+	if it.upperBound != nil && bytes.Compare(it.Key(), it.upperBound) >= 0 {
+		it.valid = false
+		it.node = nil
+	}
 	return nil
+}
+
+func (mt *MemTable) Scan(lower []byte, upper []byte) *BoundedMemTableIterator {
+	return NewBoundedMemTableIterator(mt, lower, upper)
 }

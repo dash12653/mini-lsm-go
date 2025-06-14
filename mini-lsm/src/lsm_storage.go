@@ -114,7 +114,7 @@ func (lsi *LsmStorageInner) Scan(lower []byte, upper []byte) *MergeIterator {
 	memtable := snapshot.memtable
 	lsi.state.RUnlock()
 
-	memtableIters := make([]*MemTableIteratorWithBounds, 0, len(immMemtables)+1)
+	memtableIters := make([]*BoundedMemTableIterator, 0, len(immMemtables)+1)
 	// 最新的memtable放前面
 	memtableIters = append(memtableIters, memtable.Scan(lower, upper)) // 最新 memtable，索引0
 	for i := len(snapshot.imm_memtables) - 1; i >= 0; i-- {

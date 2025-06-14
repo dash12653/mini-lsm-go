@@ -45,7 +45,7 @@ func TestMemTableIterator(t *testing.T) {
 	}
 
 	// 从 key "a" 开始迭代
-	iter := NewMemTableIterator(mt, []byte("a"))
+	iter := NewBoundedMemTableIterator(mt, []byte("a"), nil)
 
 	idx := 0
 	for iter.Valid() {
