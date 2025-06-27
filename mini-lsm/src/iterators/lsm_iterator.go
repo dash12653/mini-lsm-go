@@ -1,11 +1,13 @@
-package src
+package iterators
 
 type LsmIterator struct {
-	inner *MergeIterator
+	inner     *TwoMergeIterator
+	end_bound []byte
+	is_valid  bool
 }
 
-func NewLsmIterator(inner *MergeIterator) *LsmIterator {
-	return &LsmIterator{inner: inner}
+func NewLsmIterator(inner *TwoMergeIterator, end_bound []byte) *LsmIterator {
+	return &LsmIterator{inner: inner, end_bound: end_bound, is_valid: inner.Valid()}
 }
 
 func (li *LsmIterator) Is_valid() bool {
