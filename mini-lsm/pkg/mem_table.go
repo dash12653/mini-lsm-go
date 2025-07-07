@@ -1,4 +1,4 @@
-package src
+package pkg
 
 import (
 	"bytes"
@@ -7,10 +7,11 @@ import (
 )
 
 // MemTable wrapper of skip list
+// todo: it's not thread-safe, need to substitute it with a thread-safe skip-list implementation.
 type MemTable struct {
 	Map             *skiplist.SkipList // skip list
-	id              int                // id of this MemTable
-	ApproximateSize uint64             // approximate size（模拟 AtomicUsize）
+	id              uint               // id of this MemTable
+	ApproximateSize uint               // approximate size
 }
 
 type ByteSliceComparator struct{}
@@ -28,7 +29,7 @@ func (c *ByteSliceComparator) CalcScore(key interface{}) float64 {
 }
 
 // NewMemTable initialize an empty skiplist and return.
-func NewMemTable(id int) *MemTable {
+func NewMemTable(id uint) *MemTable {
 	return &MemTable{
 		Map: skiplist.New(&ByteSliceComparator{}),
 		id:  id,
@@ -37,15 +38,34 @@ func NewMemTable(id int) *MemTable {
 
 func (mt *MemTable) Put(key []byte, value []byte) {
 	mt.Map.Set(key, value)
+	estimzted_size := len(key) + len(value)
+	mt.ApproximateSize += uint(estimzted_size)
 }
 
 // Get gets key's corresponding value
-func (mt *MemTable) Get(key []byte) []byte {
-	return mt.Map.Get(key).Value.([]byte)
+func (mt *MemTable) Get(key []byte) ([]byte, bool) {
+	ele := mt.Map.Get(key)
+	if ele != nil {
+		return ele.Value.([]byte), true
+	}
+	return nil, false
 }
 
-func (mt *MemTable) Len() uint64 {
+func (mt *MemTable) Len() uint {
 	return mt.ApproximateSize
+}
+
+func (mt *MemTable) Flush(builder *SsTableBuilder) {
+	for node := mt.Map.Front(); node != nil; node = node.Next() {
+		if len(node.Value.([]byte)) == 0 {
+			continue
+		}
+		builder.add(node.Key().([]byte), node.Value.([]byte))
+	}
+	if len(builder.first_key) > 0 {
+		builder.finish_block()
+	}
+	return
 }
 
 type StorageIterator interface {
@@ -63,8 +83,6 @@ type BoundedMemTableIterator struct {
 	valid      bool
 }
 
-// NewBoundedMemTableIterator creates an iterator starting at `start` and bounded by `upper`.
-// If upper is nil, it's unbounded above. If start is nil, it starts from the beginning.
 func NewBoundedMemTableIterator(mt *MemTable, start []byte, upper []byte) *BoundedMemTableIterator {
 	var node *skiplist.Element
 	if start == nil {
@@ -79,7 +97,7 @@ func NewBoundedMemTableIterator(mt *MemTable, start []byte, upper []byte) *Bound
 		upperBound: upper,
 		valid:      node != nil,
 	}
-	if iter.valid && upper != nil && bytes.Compare(iter.Key(), upper) >= 0 {
+	if iter.valid && upper != nil && bytes.Compare(iter.Key(), upper) > 0 {
 		iter.valid = false
 		iter.node = nil
 	}
@@ -109,11 +127,11 @@ func (it *BoundedMemTableIterator) Next() error {
 		return errors.New("iterator is not valid")
 	}
 	it.node = it.node.Next()
-	if it.node == nil {
+	if it.node == nil || len(it.node.Key().([]byte)) == 0 {
 		it.valid = false
 		return nil
 	}
-	if it.upperBound != nil && bytes.Compare(it.Key(), it.upperBound) >= 0 {
+	if it.upperBound != nil && bytes.Compare(it.Key(), it.upperBound) > 0 {
 		it.valid = false
 		it.node = nil
 	}

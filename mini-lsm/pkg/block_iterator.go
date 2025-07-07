@@ -1,15 +1,13 @@
-package block
+package pkg
 
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
-	"mini-lsm-go/mini-lsm/src"
 )
 
 type BlockIterator struct {
 	// reference to the block
-	block src.Block
+	block Block
 	// the current key at the iterator position
 	key []byte
 	// the value range from the block
@@ -18,7 +16,7 @@ type BlockIterator struct {
 	idx uint
 }
 
-func create_block_iterator(block *src.Block) *BlockIterator {
+func create_block_iterator(block *Block) *BlockIterator {
 	return &BlockIterator{
 		block:       *block,
 		key:         make([]byte, 0),
@@ -27,13 +25,13 @@ func create_block_iterator(block *src.Block) *BlockIterator {
 	}
 }
 
-func Create_and_seek_to_first(block *src.Block) *BlockIterator {
+func Create_and_seek_to_first(block *Block) *BlockIterator {
 	iter := create_block_iterator(block)
 	iter.seek_to_first()
 	return iter
 }
 
-func Create_and_seek_to_key(block *src.Block, key []byte) *BlockIterator {
+func Create_and_seek_to_key_to_be_updated(block *Block, key []byte) *BlockIterator {
 	iter := create_block_iterator(block)
 	iter.seek_to_key(key)
 	return iter
@@ -56,7 +54,11 @@ func (iter *BlockIterator) seek_to_key(target []byte) {
 			return
 		}
 	}
-	iter.seek_to(low)
+	if low >= uint(len(iter.block.Offset)) {
+		iter.key = nil
+	} else {
+		iter.seek_to(low)
+	}
 }
 
 func (iter *BlockIterator) seek_to_first() {
@@ -64,11 +66,11 @@ func (iter *BlockIterator) seek_to_first() {
 }
 
 func (iter *BlockIterator) seek_to(idx uint) error {
-	// if idx is out of index, set this iterator to invalid
+	// if idx is out of index, set valid to false
 	if idx >= uint(len(iter.block.Offset)) {
 		iter.key = nil
 		iter.value_range = [2]uint{0, 0}
-		return fmt.Errorf("key idx out of range")
+		return nil
 	}
 	// seek to a valid index
 	offset := uint(iter.block.Offset[idx])
@@ -90,7 +92,7 @@ func (iter *BlockIterator) seek_to_offset(offset uint) error {
 	data := iter.block.Data[offset:]
 
 	// decode length of key
-	key_len := binary.LittleEndian.Uint16(data)
+	key_len := binary.BigEndian.Uint16(data)
 	data = data[2:]
 
 	// decode key
@@ -100,7 +102,7 @@ func (iter *BlockIterator) seek_to_offset(offset uint) error {
 	data = data[key_len:]
 
 	// decode length of value
-	value_len := binary.LittleEndian.Uint16(data)
+	value_len := binary.BigEndian.Uint16(data)
 	data = data[2:]
 
 	// get value range

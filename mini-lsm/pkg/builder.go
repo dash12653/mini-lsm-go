@@ -1,13 +1,12 @@
-package block
+package pkg
 
 import (
 	"encoding/binary"
 	"log"
-	"mini-lsm-go/mini-lsm/src"
 	"unsafe"
 )
 
-const SIZEOF_U16 = uint32(unsafe.Sizeof(uint16(0))) // 2 bytes
+const SIZEOF_U16 = uint(unsafe.Sizeof(uint16(0))) // 2 bytes
 
 // Block
 /* A block is the smallest unit of read and caching in LSM tree.
@@ -39,10 +38,10 @@ For example, if the first entry is at 0th position of the block, and the second 
 type BlockBuilder struct {
 	Offset     []uint16 //
 	Data       []byte
-	Block_size uint32
+	Block_size uint
 }
 
-func NewBlockBuilder(Block_size uint32) BlockBuilder {
+func NewBlockBuilder(Block_size uint) BlockBuilder {
 	return BlockBuilder{
 		Offset:     make([]uint16, 0),
 		Data:       make([]byte, 0),
@@ -51,8 +50,8 @@ func NewBlockBuilder(Block_size uint32) BlockBuilder {
 }
 
 // EstimatedSize returns the estimated size of the block
-func (b *BlockBuilder) EstimatedSize() uint32 {
-	return SIZEOF_U16 /* number of key-value pairs in the block */ + uint32(len(b.Offset))*SIZEOF_U16 /* offsets */ + uint32(len(b.Data))
+func (b *BlockBuilder) EstimatedSize() uint {
+	return SIZEOF_U16 /* number of key-value pairs in the block */ + uint(len(b.Offset))*SIZEOF_U16 /* offsets */ + uint(len(b.Data))
 }
 
 func (b *BlockBuilder) isEmpty() bool {
@@ -65,17 +64,17 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 		panic("key must not be empty")
 	}
 
-	entrySize := SIZEOF_U16*3 + uint32(len(key)) + uint32(len(value)) // key_len, key, val_len, val, offset
+	entrySize := SIZEOF_U16*3 + uint(len(key)) + uint(len(value)) // key_len, key, val_len, val, offset
 	if b.EstimatedSize()+entrySize > b.Block_size && !b.isEmpty() {
 		return false
 	}
-
+	// fmt.Println("key: ", string(key), "value: ", string(value), " added.")
 	// use current length of data as offset
 	b.Offset = append(b.Offset, uint16(len(b.Data)))
 
 	// append the length of key
 	keyLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(keyLen, uint16(len(key)))
+	binary.BigEndian.PutUint16(keyLen, uint16(len(key)))
 	b.Data = append(b.Data, keyLen...)
 
 	// append contents of key
@@ -83,7 +82,7 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 
 	// append the length of value
 	valLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(valLen, uint16(len(value)))
+	binary.BigEndian.PutUint16(valLen, uint16(len(value)))
 	b.Data = append(b.Data, valLen...)
 
 	// append contents of value
@@ -92,11 +91,11 @@ func (b *BlockBuilder) Add(key, value []byte) bool {
 	return true
 }
 
-func (b *BlockBuilder) Build() *src.Block {
+func (b *BlockBuilder) Build() *Block {
 	if len(b.Data) == 0 {
 		log.Panic("block should not be empty")
 	}
-	return &src.Block{
+	return &Block{
 		Data:   b.Data,
 		Offset: b.Offset,
 	}

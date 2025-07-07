@@ -1,4 +1,4 @@
-package src
+package pkg
 
 import "encoding/binary"
 
@@ -42,14 +42,14 @@ func (b *Block) Encode() []byte {
 	// Append each offset (u16) to the end
 	for _, offset := range b.Offset {
 		offsetBytes := make([]byte, 2)
-		binary.LittleEndian.PutUint16(offsetBytes, offset)
+		binary.BigEndian.PutUint16(offsetBytes, offset)
 		buf = append(buf, offsetBytes...)
 	}
 
 	// Append the number of elements (u16) at the very end
 	numOffsets := uint16(len(b.Offset))
 	numOffsetsBytes := make([]byte, 2)
-	binary.LittleEndian.PutUint16(numOffsetsBytes, numOffsets)
+	binary.BigEndian.PutUint16(numOffsetsBytes, numOffsets)
 	buf = append(buf, numOffsetsBytes...)
 
 	return buf
@@ -59,7 +59,7 @@ func Decode(data []byte) *Block {
 	const sizeOfU16 = 2
 
 	// Get number of offsets
-	numOffsets := binary.LittleEndian.Uint16(data[len(data)-sizeOfU16:])
+	numOffsets := binary.BigEndian.Uint16(data[len(data)-sizeOfU16:])
 	offsetsLen := int(numOffsets)
 
 	// Compute where the offsets section begins
@@ -69,7 +69,7 @@ func Decode(data []byte) *Block {
 	// Parse offsets
 	offsets := make([]uint16, offsetsLen)
 	for i := 0; i < offsetsLen; i++ {
-		offsets[i] = binary.LittleEndian.Uint16(offsetsRaw[i*sizeOfU16 : (i+1)*sizeOfU16])
+		offsets[i] = binary.BigEndian.Uint16(offsetsRaw[i*sizeOfU16 : (i+1)*sizeOfU16])
 	}
 
 	// Remaining is the actual key-value data

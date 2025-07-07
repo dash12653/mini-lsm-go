@@ -1,15 +1,14 @@
-package iterators
+package pkg
 
 import (
 	"bytes"
-	"mini-lsm-go/mini-lsm/src"
 )
 
 // TwoMergeIterator Merges two iterators of different types into one.
 // If the two iterators have the same key, only produce the key once and prefer the entry from A.
 type TwoMergeIterator struct {
-	a        src.StorageIterator
-	b        src.StorageIterator
+	a        StorageIterator
+	b        StorageIterator
 	choose_a bool
 }
 
@@ -20,7 +19,8 @@ func (t *TwoMergeIterator) if_choose_a() bool {
 	if !t.b.Valid() {
 		return true
 	}
-	return bytes.Compare(t.a.Key(), t.b.Key()) < 0
+	// prefer entry from a
+	return bytes.Compare(t.a.Key(), t.b.Key()) <= 0
 }
 
 func (it *TwoMergeIterator) skip_b() error {
@@ -34,7 +34,7 @@ func (it *TwoMergeIterator) skip_b() error {
 	return nil
 }
 
-func NewTwoMergeIterator(a, b src.StorageIterator) *TwoMergeIterator {
+func NewTwoMergeIterator(a, b StorageIterator) *TwoMergeIterator {
 	iter := &TwoMergeIterator{
 		a:        a,
 		b:        b,

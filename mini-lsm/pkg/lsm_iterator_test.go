@@ -1,4 +1,4 @@
-package iterators
+package pkg
 
 import (
 	"testing"
@@ -33,19 +33,16 @@ func (m *mockIterator) Next() error {
 }
 
 func TestLsmIterator_SimpleMerge(t *testing.T) {
-	// 假设 MemTable 层数据为：
 	mem1 := &mockIterator{data: [][2][]byte{
 		{[]byte("a"), []byte("apple")},
 		{[]byte("c"), []byte("cat")},
 	}}
 
-	// 假设 SSTable 层数据为：
 	sst1 := &mockIterator{data: [][2][]byte{
 		{[]byte("b"), []byte("banana")},
 		{[]byte("d"), []byte("dog")},
 	}}
 
-	// Merge 两个层
 	two := NewTwoMergeIterator(mem1, sst1)
 	lsm := NewLsmIterator(two, nil)
 

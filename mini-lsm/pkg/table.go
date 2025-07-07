@@ -1,4 +1,4 @@
-package src
+package pkg
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ type SsTable struct {
 	BlockMeta []BlockMeta
 
 	// The byte offset in the file where the block metadata starts
-	BlockMetaOffset uint
+	BlockMetaOffset uint64
 
 	// Unique ID of the SSTable
 	ID uint
@@ -83,20 +83,20 @@ func NewFileObject(path string, data []byte) (*FileObject, error) {
 	}, nil
 }
 
-func (s *SsTable) Read_block(idx uint) (*Block, error) {
+func (s *SsTable) Read_block(idx uint64) (*Block, error) {
 	// get start offset
 	offset := s.BlockMeta[idx].Offset
 
 	// get end offset
-	var offsetEnd uint
-	if idx+1 < uint(len(s.BlockMeta)) {
+	var offsetEnd uint64
+	if idx+1 < uint64(len(s.BlockMeta)) {
 		offsetEnd = s.BlockMeta[idx+1].Offset
 	} else {
 		offsetEnd = s.BlockMetaOffset
 	}
 
 	// read data bytes within this intersection
-	data, err := s.File.Read(uint64(offset), uint64(offsetEnd-offset))
+	data, err := s.File.Read(offset, offsetEnd-offset)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (s *SsTable) Read_block(idx uint) (*Block, error) {
 }
 
 // Find Find_block_idx block that may contain `key`.
-func (s *SsTable) Find_block_idx(key []byte) uint {
+func (s *SsTable) Find_block_idx(key []byte) uint64 {
 	// 实现 partition_point
 	low, high := 0, len(s.BlockMeta)
 	for low < high {
@@ -118,15 +118,14 @@ func (s *SsTable) Find_block_idx(key []byte) uint {
 			high = mid
 		}
 	}
-	// 等价于 saturating_sub(1)
 	if low == 0 {
 		return 0
 	}
-	return uint(low - 1)
+	return uint64(low - 1)
 }
 
 type BlockMeta struct {
-	Offset    uint
+	Offset    uint64
 	First_key []byte
 	Last_key  []byte
 }
@@ -137,14 +136,14 @@ func EncodeBlockMeta(metas []BlockMeta) []byte {
 
 	for _, meta := range metas {
 		// Write Offset
-		binary.Write(buf, binary.LittleEndian, meta.Offset)
+		binary.Write(buf, binary.BigEndian, meta.Offset)
 
 		// Write FirstKey
-		binary.Write(buf, binary.LittleEndian, uint16(len(meta.First_key)))
+		binary.Write(buf, binary.BigEndian, uint16(len(meta.First_key)))
 		buf.Write(meta.First_key)
 
 		// Write LastKey
-		binary.Write(buf, binary.LittleEndian, uint16(len(meta.Last_key)))
+		binary.Write(buf, binary.BigEndian, uint16(len(meta.Last_key)))
 		buf.Write(meta.Last_key)
 	}
 
@@ -157,16 +156,16 @@ func DecodeBlockMeta(data []byte) ([]BlockMeta, error) {
 	buf := bytes.NewReader(data)
 
 	for buf.Len() > 0 {
-		var offset uint
+		var offset uint64
 		var firstKeyLen, lastKeyLen uint16
 
 		// Read Offset
-		if err := binary.Read(buf, binary.LittleEndian, &offset); err != nil {
+		if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
 			return nil, fmt.Errorf("failed to read offset: %w", err)
 		}
 
 		// Read FirstKey
-		if err := binary.Read(buf, binary.LittleEndian, &firstKeyLen); err != nil {
+		if err := binary.Read(buf, binary.BigEndian, &firstKeyLen); err != nil {
 			return nil, fmt.Errorf("failed to read firstKeyLen: %w", err)
 		}
 		firstKey := make([]byte, firstKeyLen)
@@ -175,7 +174,7 @@ func DecodeBlockMeta(data []byte) ([]BlockMeta, error) {
 		}
 
 		// Read LastKey
-		if err := binary.Read(buf, binary.LittleEndian, &lastKeyLen); err != nil {
+		if err := binary.Read(buf, binary.BigEndian, &lastKeyLen); err != nil {
 			return nil, fmt.Errorf("failed to read lastKeyLen: %w", err)
 		}
 		lastKey := make([]byte, lastKeyLen)
