@@ -13,18 +13,17 @@ import (
 type MiniLsm struct {
 	inner *LsmStorageInner
 
-	// channel to receve stop
+	// channel to receive stop
 	flushStopCh chan struct{}
 
 	// wait group
 	flushWg sync.WaitGroup
 
-	// Notifies the compaction thread to stop working
-	//compaction_notifier
+	// channel to receive stop
+	compactionStopCh chan struct{}
 
-	// The handler for the compaction thread
-	// compaction_thread
-
+	// wait group
+	compactionWg sync.WaitGroup
 }
 
 func (lsm *MiniLsm) Get(key []byte) []byte {
@@ -55,18 +54,66 @@ func (lsm *MiniLsm) Force_flush() {
 	return
 }
 
+func (lsm *MiniLsm) Dump() {
+	lsm.inner.state.RLock()
+	defer lsm.inner.state.RUnlock()
+	snapshot := lsm.inner.LsmStorageState
+	memTable := snapshot.memtable
+	fmt.Println("Current memTable: ", memTable, "ID: ", memTable.id, "\n")
+	length := len(snapshot.imm_memtables)
+	for i := length - 1; i >= 0; i-- {
+		t := snapshot.imm_memtables[i]
+		fmt.Println("immutable memTables: ", t, "ID: ", t.id)
+	}
+	fmt.Println("")
+	length = len(snapshot.l0_sstables)
+	for i := length - 1; i >= 0; i-- {
+		t := snapshot.sstables[snapshot.l0_sstables[i]]
+		fmt.Println("Level 0 SSTs: ", t, "ID: ", t.ID)
+	}
+	fmt.Println("")
+	fmt.Println("From level 1 -> maxLevel: ")
+	lsm.inner.showLevels()
+}
+
 func Open() *MiniLsm {
+	inner := &LsmStorageInner{
+		state:           sync.RWMutex{},
+		state_lock:      sync.Mutex{},
+		LsmStorageState: NewLsmStorageState(),
+		Options:         &LsmStorageOptions{block_size: 64, target_sst_size: 1024, num_memtable_limit: 4}, // Test: 64 + 256
+		compactionController: NewLeveledCompactionController(LeveledCompactionOptions{
+			levelSizeMultiplier:            10,
+			Level0FileNumCompactionTrigger: 3,
+			MaxLevels:                      6,
+			BaseLevelSizeMb:                2,
+		}),
+	}
+
+	//NewSimpleLeveledCompactionController(&SimpleLeveledCompactionOptions{
+	//	sizeRatioPercent:               200.0,
+	//	level0FileNumCompactionTrigger: 3,
+	//	maxLevels:                      6,
+	//}),
+
+	// init
+	inner.LsmStorageState.levels = make([]*Level, inner.compactionController.options.MaxLevels)
+	for i, _ := range inner.LsmStorageState.levels {
+		inner.LsmStorageState.levels[i] = &Level{
+			LevelNum: 0,
+			SSTables: make([]uint, 0),
+		}
+	}
+
 	lsm := &MiniLsm{
-		inner: &LsmStorageInner{
-			state:           sync.RWMutex{},
-			state_lock:      sync.Mutex{},
-			LsmStorageState: NewLsmStorageState(),
-			Options:         &LsmStorageOptions{block_size: 64, target_sst_size: 256, num_memtable_limit: 2}, // Test: 64 + 256
-		},
-		flushStopCh: make(chan struct{}),
-		flushWg:     sync.WaitGroup{},
+		inner:            inner,
+		flushStopCh:      make(chan struct{}),
+		flushWg:          sync.WaitGroup{},
+		compactionStopCh: make(chan struct{}),
+		compactionWg:     sync.WaitGroup{},
 	}
 	lsm.SpawnFlushThread()
+	lsm.SpawnCompactionThread()
 	return lsm
 }
 
@@ -124,6 +171,8 @@ type LsmStorageInner struct {
 	LsmStorageState *LsmStorageState
 	// config options
 	Options *LsmStorageOptions
+	// compaction controller
+	compactionController *LeveledCompactionController
 }
 
 type LsmStorageOptions struct {
@@ -135,6 +184,8 @@ type LsmStorageOptions struct {
 	num_memtable_limit uint
 	//pub compaction_options: CompactionOptions,
 	enable_wal bool
+	// compaction type
+	compactionOptions compactionOptions
 }
 
 // Get return value based on key
@@ -171,6 +222,21 @@ func (lsi *LsmStorageInner) Get(key []byte) ([]byte, bool) {
 		return SSTMergeIters.Value(), true
 	}
 
+	// step 4. try to find key in level 1 - maxLevel.
+	for _, level := range lsi.LsmStorageState.levels {
+		SsTables := make([]*SsTable, 0)
+		for m := 0; m < len(level.SSTables); m++ {
+			SsTables = append(SsTables, lsi.LsmStorageState.sstables[level.SSTables[m]])
+		}
+		iter, err := NewSstConcatIteratorSeekToKey(SsTables, key)
+		if err != nil {
+			panic(err)
+		}
+		if iter != nil && iter.Valid() && bytes.Compare(iter.Key(), key) == 0 {
+			return iter.Value(), true
+		}
+	}
+
 	// didn't find key
 	return nil, false
 }
@@ -199,12 +265,10 @@ func (lsi *LsmStorageInner) Delete(key []byte) {
 func (lsi *LsmStorageInner) try_freeze() {
 	// check size of the memtable and try freeze
 	if lsi.LsmStorageState.memtable.ApproximateSize >= lsi.Options.target_sst_size {
-		lsi.state.Lock()
 		// check again to avoid duplicate freeze
 		if lsi.LsmStorageState.memtable.ApproximateSize >= lsi.Options.target_sst_size {
 			lsi.force_freeze_memtable()
 		}
-		lsi.state.Unlock()
 	}
 }
 
@@ -227,30 +291,53 @@ func (lsi *LsmStorageInner) Scan(lower []byte, upper []byte) StorageIterator {
 
 	memtableIters := make([]StorageIterator, 0, len(immMemtables)+1)
 
-	memtableIters = append(memtableIters, memtable.Scan(lower, upper)) // 最新 memtable，索引0
+	memtableIters = append(memtableIters, memtable.Scan(lower, upper))
 	for i := len(snapshot.imm_memtables) - 1; i >= 0; i-- {
-		// fmt.Println("length := ", len(snapshot.imm_memtables), "i:= ", i, "memtableid := ", snapshot.imm_memtables[i].id)
 		memtableIters = append(memtableIters, snapshot.imm_memtables[i].Scan(lower, upper))
 	}
 	memtableMergeIters := NewMergeIteratorFromBoundIterators(memtableIters)
 
 	// create sst iterators
 	SSTIters := make([]StorageIterator, 0)
-	if len(lsi.LsmStorageState.l0_sstables) > 0 {
-		// newest first
-		for i := len(lsi.LsmStorageState.l0_sstables) - 1; i >= 0; i-- {
-			sst_id := lsi.LsmStorageState.l0_sstables[i]
-			sstable := lsi.LsmStorageState.sstables[sst_id]
-			iter := Create_and_seek_to_key(sstable, lower)
-			SSTIters = append(SSTIters, iter)
-		}
-
-		SSTMergeIters := NewMergeIteratorFromBoundIterators(SSTIters)
-		twoMergeIterator := NewTwoMergeIterator(memtableMergeIters, SSTMergeIters)
-		return twoMergeIterator
+	// newest first
+	for i := len(lsi.LsmStorageState.l0_sstables) - 1; i >= 0; i-- {
+		sst_id := lsi.LsmStorageState.l0_sstables[i]
+		sstable := lsi.LsmStorageState.sstables[sst_id]
+		iter := Create_and_seek_to_key(sstable, lower)
+		SSTIters = append(SSTIters, iter)
 	}
 
-	return NewFusedIterator(memtableMergeIters)
+	SSTMergeIters := NewMergeIteratorFromBoundIterators(SSTIters)
+	a := NewTwoMergeIterator(memtableMergeIters, SSTMergeIters)
+
+	var lowerLevelsIter []StorageIterator
+	for _, level := range snapshot.levels {
+		SstIDs := level.SSTables
+		levelTables := make([]*SsTable, 0)
+		for _, tableID := range SstIDs {
+			Sst := snapshot.sstables[tableID]
+			if rangeOverlap(lower, upper, Sst.FirstKey, Sst.LastKey) {
+				levelTables = append(levelTables, Sst)
+			}
+		}
+		levelTablesIter, err := NewSstConcatIteratorSeekToKey(levelTables, lower)
+		if err != nil {
+			panic(err)
+		}
+		lowerLevelsIter = append(lowerLevelsIter, levelTablesIter)
+	}
+
+	b := NewMergeIteratorFromBoundIterators(lowerLevelsIter)
+	c := NewTwoMergeIterator(a, b)
+
+	return NewFusedIterator(c, upper)
+}
+
+func rangeOverlap(userBegin, userEnd, tableBegin, tableEnd []byte) bool {
+	if bytes.Compare(tableEnd, userBegin) < 0 || bytes.Compare(tableBegin, userEnd) > 0 {
+		return false
+	}
+	return true
 }
 
 // force_flush_next_memtable flushes the earliest-created immutable memtable to disk
@@ -292,8 +379,7 @@ func (lsi *LsmStorageInner) path_of_sst(id uint) string {
 	return lsi.path_of_sst_static(lsi.path, id)
 }
 
-// todo: optimize lock's usage
-func (lsi *LsmStorageInner) compact(forceCompaction *ForceFullCompaction) *SsTable {
+func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullCompaction) []*SsTable {
 	// Build L0 SSTable iterators
 	l0SSTables := forceCompaction.l0SSTables
 	l0SSTablesIters := make([]StorageIterator, 0)
@@ -304,27 +390,49 @@ func (lsi *LsmStorageInner) compact(forceCompaction *ForceFullCompaction) *SsTab
 	}
 	a := NewMergeIteratorFromBoundIterators(l0SSTablesIters)
 
+	var twoMergeIter StorageIterator
 	// Build L1 SSTable iterators
-	l1SSTables := forceCompaction.l0SSTables
-	l1SSTablesIters := make([]StorageIterator, 0)
-	length = len(lsi.LsmStorageState.l0_sstables)
-	for i := length - 1; i >= 0; i-- {
-		iter := Create_and_seek_to_first_(lsi.LsmStorageState.sstables[l1SSTables[i]])
-		l1SSTablesIters = append(l1SSTablesIters, iter)
+	if len(forceCompaction.l1SSTables) != 0 {
+		l1SSTables := forceCompaction.l1SSTables
+		l1SSTablesArr := make([]*SsTable, 0)
+		length = len(l1SSTables)
+		for i := 0; i < length; i++ {
+			l1SSTablesArr = append(l1SSTablesArr, lsi.LsmStorageState.sstables[l1SSTables[i]])
+		}
+		b, err := NewSstConcatIterSeekToFirst(l1SSTablesArr)
+		if err != nil {
+			panic(err)
+		}
+		twoMergeIter = NewTwoMergeIterator(a, b)
+	} else {
+		twoMergeIter = a
 	}
-	b := NewMergeIteratorFromBoundIterators(l1SSTablesIters)
 
-	// build two merge iterator
-	twoMergeIter := NewTwoMergeIterator(a, b)
+	// newSSts
+	newSSts := make([]*SsTable, 0)
 
 	// compact
 	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	i := 1
 	for twoMergeIter.Valid() {
+		fmt.Println("i: ", i, string(twoMergeIter.Key()), string(twoMergeIter.Key()))
+		i++
 		builder.add(twoMergeIter.Key(), twoMergeIter.Value())
+		if builder.estimated_size() >= uint32(lsi.Options.target_sst_size) {
+			builder.finish_block()
+			newID := lsi.NextSSTId()
+			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSts = append(newSSts, newSSt)
+			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+		}
 		twoMergeIter.Next()
 	}
+
 	if len(builder.first_key) > 0 {
 		builder.finish_block()
+		newID := lsi.NextSSTId()
+		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSts = append(newSSts, newSSt)
 	}
 
 	// maintain lsm tree meta
@@ -347,6 +455,7 @@ func (lsi *LsmStorageInner) compact(forceCompaction *ForceFullCompaction) *SsTab
 
 	// step 2. delete l1 sst files and delete meta data
 	for _, v := range forceCompaction.l1SSTables {
+
 		tbl := lsi.LsmStorageState.sstables[v]
 		fileName := lsi.path_of_sst(tbl.ID)
 		// delete file
@@ -358,19 +467,330 @@ func (lsi *LsmStorageInner) compact(forceCompaction *ForceFullCompaction) *SsTab
 		}
 		// delete metadata in LsmStorageState
 		delete(lsi.LsmStorageState.sstables, v)
-	}
-	// delete metadata in LsmStorageState
-	length = len(forceCompaction.l1SSTables)
-	lsi.LsmStorageState.levels[0].SSTables = lsi.LsmStorageState.levels[0].SSTables[length:]
-	lsi.LsmStorageState.levels[0].LevelNum -= length
 
+	}
+
+	// delete metadata in LsmStorageState
+	lsi.LsmStorageState.levels[0].SSTables = make([]uint, 0)
+	lsi.LsmStorageState.levels[0].LevelNum = 0
 	// add this new sst file to level 1
-	id := lsi.NextSSTId()
-	newSST := builder.build(id, lsi.path_of_sst(id))
-	lsi.LsmStorageState.sstables[id] = newSST
-	lsi.LsmStorageState.levels[0].LevelNum++
-	lsi.LsmStorageState.levels[0].SSTables = append(lsi.LsmStorageState.levels[0].SSTables, id)
-	return newSST
+	for _, v := range newSSts {
+		lsi.LsmStorageState.sstables[v.ID] = v
+		lsi.LsmStorageState.levels[0].LevelNum++
+		lsi.LsmStorageState.levels[0].SSTables = append(lsi.LsmStorageState.levels[0].SSTables, v.ID)
+	}
+
+	return newSSts
+}
+
+func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompactionTask) []*SsTable {
+	if task.upperLevel == nil {
+		fullCompactionTask := &ForceFullCompaction{
+			l0SSTables: lsi.LsmStorageState.l0_sstables,
+			l1SSTables: task.lowerLevelSstIds,
+		}
+		return lsi.DoForceFullCompaction(fullCompactionTask)
+	}
+
+	var twoMergeIter StorageIterator
+	// Build upper SSTable iterators
+	UpperTableIDS := task.upperLevelSstIds
+	UpperTables := make([]*SsTable, len(UpperTableIDS))
+	LowerTablesIDS := task.lowerLevelSstIds
+	LowerTables := make([]*SsTable, len(LowerTablesIDS))
+	for i, v := range UpperTableIDS {
+		UpperTables[i] = lsi.LsmStorageState.sstables[v]
+	}
+	for i, v := range LowerTablesIDS {
+		LowerTables[i] = lsi.LsmStorageState.sstables[v]
+	}
+	UpperTablesIters, err := NewSstConcatIterSeekToFirst(UpperTables)
+	if err != nil {
+		panic(err)
+	}
+	LowerTablesIters, err := NewSstConcatIterSeekToFirst(LowerTables)
+	if err != nil {
+		panic(err)
+	}
+	// todo: may remove this if-else branch
+	if len(LowerTablesIDS) == 0 {
+		twoMergeIter = UpperTablesIters
+	} else {
+		twoMergeIter = NewTwoMergeIterator(UpperTablesIters, LowerTablesIters)
+	}
+
+	// newSSts
+	newSSts := make([]*SsTable, 0)
+
+	// compact
+	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	i := 1
+	for twoMergeIter.Valid() {
+		fmt.Println("i: ", i, string(twoMergeIter.Key()), string(twoMergeIter.Key()))
+		i++
+		builder.add(twoMergeIter.Key(), twoMergeIter.Value())
+		if builder.estimated_size() >= uint32(lsi.Options.target_sst_size) {
+			if len(builder.first_key) > 0 {
+				builder.finish_block()
+			}
+
+			newID := lsi.NextSSTId()
+			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSts = append(newSSts, newSSt)
+			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+		}
+		twoMergeIter.Next()
+	}
+
+	if len(builder.first_key) > 0 {
+		builder.finish_block()
+		newID := lsi.NextSSTId()
+		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSts = append(newSSts, newSSt)
+	}
+
+	// todo: maintain meta data
+	lsi.state.Lock()
+	defer lsi.state.Unlock()
+	// maintain lsm tree meta
+	// step 1. delete upper sst files and delete meta data
+	for _, v := range task.upperLevelSstIds {
+		tbl := lsi.LsmStorageState.sstables[v]
+		fileName := lsi.path_of_sst(tbl.ID)
+		// delete file
+		err = os.Remove(fileName)
+		if err != nil {
+			fmt.Println("file delete failure:", err)
+		} else {
+			fmt.Println("sst file deleted:", fileName)
+		}
+		// delete metadata in LsmStorageState
+		delete(lsi.LsmStorageState.sstables, v)
+	}
+
+	// step 2. delete lower sst files and delete meta data
+	for _, v := range task.lowerLevelSstIds {
+
+		tbl := lsi.LsmStorageState.sstables[v]
+		fileName := lsi.path_of_sst(tbl.ID)
+		// delete file
+		err = os.Remove(fileName)
+		if err != nil {
+			fmt.Println("file delete failure:", err)
+		} else {
+			fmt.Println("sst file deleted:", fileName)
+		}
+		// delete metadata in LsmStorageState
+		delete(lsi.LsmStorageState.sstables, v)
+
+	}
+
+	// delete metadata in LsmStorageState.levels
+	lsi.LsmStorageState.levels[*task.upperLevel-1].SSTables = make([]uint, 0)
+	lsi.LsmStorageState.levels[*task.upperLevel-1].LevelNum = 0
+
+	lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables = make([]uint, 0)
+	lsi.LsmStorageState.levels[task.lowerLevel-1].LevelNum = 0
+
+	// add these new sst files to lowerLevel
+	for _, v := range newSSts {
+		lsi.LsmStorageState.sstables[v.ID] = v
+		lsi.LsmStorageState.levels[task.lowerLevel-1].LevelNum++
+		lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables = append(lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables, v.ID)
+	}
+
+	return newSSts
+}
+
+func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*SsTable {
+	lsi.state.RLock()
+	var a, b StorageIterator
+
+	if task.upperLevel == nil {
+		l0SsTables := task.upperLevelSstIds
+		l0SSTablesIters := make([]StorageIterator, 0)
+		length := len(l0SsTables)
+		for i := length - 1; i >= 0; i-- {
+			iter := Create_and_seek_to_first_(lsi.LsmStorageState.sstables[l0SsTables[i]])
+			l0SSTablesIters = append(l0SSTablesIters, iter)
+		}
+		a = NewMergeIteratorFromBoundIterators(l0SSTablesIters)
+	} else {
+		upperSsTablesIDs := task.upperLevelSstIds
+		upperSsTables := make([]*SsTable, 0)
+		for _, v := range upperSsTablesIDs {
+			upperSsTables = append(upperSsTables, lsi.LsmStorageState.sstables[v])
+		}
+		c, err := NewSstConcatIterSeekToFirst(upperSsTables)
+		if err != nil {
+			panic(err)
+		}
+		a = c
+	}
+
+	lowerSsTablesIDs := task.lowerLevelSstIds
+	lowerSsTables := make([]*SsTable, 0)
+	for _, v := range lowerSsTablesIDs {
+		lowerSsTables = append(lowerSsTables, lsi.LsmStorageState.sstables[v])
+	}
+	d, err := NewSstConcatIterSeekToFirst(lowerSsTables)
+	if err != nil {
+		panic(err)
+	}
+	b = d
+	lsi.state.RUnlock()
+	twoMergeIter := NewTwoMergeIterator(a, b)
+
+	// newSSts
+	newSSts := make([]*SsTable, 0)
+
+	// compact
+	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	for twoMergeIter.Valid() {
+		builder.add(twoMergeIter.Key(), twoMergeIter.Value())
+		if builder.estimated_size() >= uint32(lsi.Options.target_sst_size) {
+			if len(builder.first_key) > 0 {
+				builder.finish_block()
+			}
+
+			newID := lsi.NextSSTId()
+			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSts = append(newSSts, newSSt)
+			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+		}
+		twoMergeIter.Next()
+	}
+
+	if len(builder.first_key) > 0 {
+		builder.finish_block()
+		newID := lsi.NextSSTId()
+		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSts = append(newSSts, newSSt)
+	}
+
+	// todo: maintain meta data
+	lsi.state.Lock()
+	defer lsi.state.Unlock()
+	// maintain lsm tree meta
+	// step 1. delete upper sst files and delete meta data
+	for _, v := range task.upperLevelSstIds {
+		tbl := lsi.LsmStorageState.sstables[v]
+		fileName := lsi.path_of_sst(tbl.ID)
+		// delete file
+		err = os.Remove(fileName)
+		if err != nil {
+			fmt.Println("file delete failure:", err)
+		}
+		// delete metadata in LsmStorageState
+		delete(lsi.LsmStorageState.sstables, v)
+	}
+
+	// step 2. delete lower sst files and delete meta data
+	for _, v := range task.lowerLevelSstIds {
+
+		tbl := lsi.LsmStorageState.sstables[v]
+		fileName := lsi.path_of_sst(tbl.ID)
+		// delete file
+		err = os.Remove(fileName)
+		if err != nil {
+			fmt.Println("file delete failure:", err)
+		}
+		// delete metadata in LsmStorageState
+		delete(lsi.LsmStorageState.sstables, v)
+
+	}
+
+	// delete metadata in LsmStorageState.levels
+	if task.upperLevel == nil {
+		lsi.LsmStorageState.l0_sstables = lsi.LsmStorageState.l0_sstables[len(task.upperLevelSstIds):]
+	} else {
+		level := &lsi.LsmStorageState.levels[*task.upperLevel-1]
+		newSSTables := make([]uint, 0, len((*level).SSTables))
+		toDelete := make(map[uint]bool)
+		for _, id := range task.upperLevelSstIds {
+			toDelete[id] = true
+		}
+		for _, id := range (*level).SSTables {
+			if !toDelete[id] {
+				newSSTables = append(newSSTables, id)
+			}
+		}
+		(*level).SSTables = newSSTables
+		(*level).LevelNum = len(newSSTables)
+	}
+
+	level := &lsi.LsmStorageState.levels[task.lowerLevel-1]
+	newSSTables := make([]uint, 0, len((*level).SSTables))
+	toDelete := make(map[uint]bool)
+	for _, id := range task.lowerLevelSstIds {
+		toDelete[id] = true
+	}
+	for _, id := range (*level).SSTables {
+		if !toDelete[id] {
+			newSSTables = append(newSSTables, id)
+		}
+	}
+	(*level).SSTables = newSSTables
+	(*level).LevelNum = len(newSSTables)
+
+	oldSsts := lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables
+
+	get := func(id uint) *SsTable {
+		return lsi.LsmStorageState.sstables[id]
+	}
+
+	merged := make([]uint, 0, len(oldSsts)+len(newSSts))
+	i, j := 0, 0
+
+	for i < len(oldSsts) && j < len(newSSts) {
+		old := get(oldSsts[i])
+		newSst := newSSts[j]
+		if bytes.Compare(old.FirstKey, newSst.FirstKey) < 0 {
+			merged = append(merged, old.ID)
+			i++
+		} else {
+			// Register the new SSTable into metadata
+			lsi.LsmStorageState.sstables[newSst.ID] = newSst
+			merged = append(merged, newSst.ID)
+			j++
+		}
+	}
+
+	// Add any leftovers
+	for ; i < len(oldSsts); i++ {
+		merged = append(merged, oldSsts[i])
+	}
+
+	for ; j < len(newSSts); j++ {
+		newSst := newSSts[j]
+		lsi.LsmStorageState.sstables[newSst.ID] = newSst
+		merged = append(merged, newSst.ID)
+	}
+
+	// Update level
+	lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables = merged
+	lsi.LsmStorageState.levels[task.lowerLevel-1].LevelNum = len(merged)
+
+	return newSSts
+}
+
+// todo: optimize lock's usage
+func (lsi *LsmStorageInner) compact(task compactionTask) []*SsTable {
+	var SSTables []*SsTable
+	switch t := task.(type) {
+	case *ForceFullCompaction:
+		// fmt.Println("ForceFullCompaction")
+		SSTables = lsi.DoForceFullCompaction(t)
+	case *SimpleLeveledCompactionTask:
+		// fmt.Println("SimpleLeveledCompactionTask")
+		SSTables = lsi.DoSimpleLeveledCompaction(t)
+	case *LeveledCompactionTask:
+		// fmt.Println("LeveledCompactionTask")
+		SSTables = lsi.DoLeveledCompaction(t)
+	default:
+		fmt.Println("Unknown CompactionTask")
+	}
+	return SSTables
 }
 
 func (lsi *LsmStorageInner) NextSSTId() uint {
@@ -381,12 +801,19 @@ func (lsi *LsmStorageInner) forceFullCompaction() {
 	lsi.state.Lock()
 	defer lsi.state.Unlock()
 	l0SSTables := lsi.LsmStorageState.l0_sstables
-	l1SSTables := lsi.LsmStorageState.levels[0].SSTables
+	var l1SSTables []uint
+	if len(lsi.LsmStorageState.levels) != 0 {
+		l1SSTables = lsi.LsmStorageState.levels[0].SSTables
+	}
 	forceCompaction := &ForceFullCompaction{
 		l0SSTables: l0SSTables,
 		l1SSTables: l1SSTables,
 	}
 	lsi.compact(forceCompaction)
+}
+
+func (engine *MiniLsm) ForceFullCompaction() {
+	engine.inner.forceFullCompaction()
 }
 
 // SpawnFlushThread starts a background goroutine that periodically triggers flushes.
@@ -405,7 +832,7 @@ func (lsm *MiniLsm) SpawnFlushThread() {
 			select {
 			case <-ticker.C:
 				// On each tick, try to flush
-				if err := lsm.inner.trigger_flush(); err != nil {
+				if err := lsm.inner.triggerFlush(); err != nil {
 					fmt.Printf("flush failed: %v\n", err) // Print error if flush fails
 				}
 
@@ -417,17 +844,43 @@ func (lsm *MiniLsm) SpawnFlushThread() {
 	}()
 }
 
+// SpawnCompactionThread starts a background goroutine that periodically triggers compactions.
+// - wg: WaitGroup to manage goroutine lifecycle
+// - stopCh: channel to signal graceful shutdown of the compaction thread
+func (lsm *MiniLsm) SpawnCompactionThread() {
+	lsm.compactionWg.Add(1) // Register one goroutine to the WaitGroup
+	go func() {
+		defer lsm.compactionWg.Done() // Mark the goroutine as done on exit
+
+		// Create a ticker that ticks every 50 milliseconds
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop() // Always stop the ticker to prevent resource leaks
+
+		for {
+			select {
+			case <-ticker.C:
+				// On each tick, try to compact
+				lsm.inner.triggerCompaction()
+			case <-lsm.flushStopCh:
+				// Exit if stop signal is received
+				return
+			}
+		}
+	}()
+}
+
 type FusedIterator struct {
 	iter        StorageIterator
+	upper       []byte
 	has_errored bool
 }
 
-func NewFusedIterator(iter StorageIterator) *FusedIterator {
-	return &FusedIterator{iter: iter, has_errored: false}
+func NewFusedIterator(iter StorageIterator, upper []byte) *FusedIterator {
+	return &FusedIterator{iter: iter, upper: upper, has_errored: false}
 }
 
 func (iter *FusedIterator) Valid() bool {
-	return iter.iter.Valid() && !iter.has_errored
+	return iter.iter.Valid() && !iter.has_errored && bytes.Compare(iter.iter.Key(), iter.upper) <= 0
 }
 
 func (iter *FusedIterator) Key() []byte {
@@ -451,7 +904,7 @@ func (iter *FusedIterator) Next() error {
 	}
 	if iter.iter.Valid() {
 		iter.iter.Next()
-		if !iter.iter.Valid() {
+		if !iter.iter.Valid() || bytes.Compare(iter.iter.Key(), iter.upper) > 0 {
 			iter.has_errored = true
 			return nil
 		}

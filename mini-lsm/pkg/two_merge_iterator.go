@@ -34,7 +34,7 @@ func (it *TwoMergeIterator) skip_b() error {
 	return nil
 }
 
-func NewTwoMergeIterator(a, b StorageIterator) *TwoMergeIterator {
+func NewTwoMergeIterator(a, b StorageIterator) StorageIterator {
 	iter := &TwoMergeIterator{
 		a:        a,
 		b:        b,

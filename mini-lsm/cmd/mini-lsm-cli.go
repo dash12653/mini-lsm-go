@@ -49,7 +49,7 @@ func main() {
 			}
 			for i := begin; i <= end; i++ {
 				key := uint64ToBytes(i)
-				val := []byte(fmt.Sprintf("value%d@%d", i, epoch))
+				val := []byte(fmt.Sprintf("value%d@%dvaluevaluevalue", i, epoch))
 				lsmEngine.Put(key, val)
 			}
 			fmt.Printf("%d values filled with epoch %d\n", end-begin+1, epoch)
@@ -89,9 +89,6 @@ func main() {
 			)
 			cnt := 0
 			for iter.Valid() {
-				if bytesToUint64(iter.Key()) > endInt {
-					break
-				}
 				cnt++
 				k := bytesToUint64(iter.Key())
 				fmt.Printf("%d=%s\n", k, string(iter.Value()))
@@ -118,6 +115,10 @@ func main() {
 			break
 		} else if line == "flush" {
 			lsmEngine.Force_flush()
+		} else if line == "compact" {
+			lsmEngine.ForceFullCompaction()
+		} else if line == "dump" {
+			lsmEngine.Dump()
 		} else {
 			fmt.Println("invalid command:", line)
 		}
