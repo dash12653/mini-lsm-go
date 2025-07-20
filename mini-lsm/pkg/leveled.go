@@ -2,18 +2,18 @@ package pkg
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"sort"
 )
 
 type LeveledCompactionTask struct {
-	// if upperLevel is nil, then it's L0 compaction
-	upperLevel              *int
-	upperLevelSstIds        []uint
-	lowerLevel              int
-	lowerLevelSstIds        []uint
-	isLowerLevelBottomLevel bool
+	UpperLevel              *int   `json:"upper_level"`
+	UpperLevelSstIds        []uint `json:"upper_level_sst_ids"`
+	LowerLevel              int    `json:"lower_level"`
+	LowerLevelSstIds        []uint `json:"lower_level_sst_ids"`
+	IsLowerLevelBottomLevel bool   `json:"is_lower_level_bottom_level"`
 }
-
 type LeveledCompactionOptions struct {
 	levelSizeMultiplier            int
 	Level0FileNumCompactionTrigger int
@@ -105,11 +105,11 @@ func (c *LeveledCompactionController) GenerateCompactionTask(snapshot *LsmStorag
 	if len(snapshot.l0_sstables) >= c.options.Level0FileNumCompactionTrigger {
 		// fmt.Printf("flush L0 SST to base level %d\n", baseLevel)
 		return &LeveledCompactionTask{
-			upperLevel:              nil,                                          // None表示L0
-			upperLevelSstIds:        append([]uint(nil), snapshot.l0_sstables...), // clone
-			lowerLevel:              baseLevel,
-			lowerLevelSstIds:        c.FindOverlappingSsts(snapshot, snapshot.l0_sstables, uint(baseLevel)),
-			isLowerLevelBottomLevel: baseLevel == c.options.MaxLevels,
+			UpperLevel:              nil,                                          // None表示L0
+			UpperLevelSstIds:        append([]uint(nil), snapshot.l0_sstables...), // clone
+			LowerLevel:              baseLevel,
+			LowerLevelSstIds:        c.FindOverlappingSsts(snapshot, snapshot.l0_sstables, uint(baseLevel)),
+			IsLowerLevelBottomLevel: baseLevel == c.options.MaxLevels,
 		}
 	}
 
@@ -138,11 +138,11 @@ func (c *LeveledCompactionController) GenerateCompactionTask(snapshot *LsmStorag
 		// fmt.Printf("compaction triggered by priority: level %d, select sst %d\n", level, selectedSST)
 
 		return &LeveledCompactionTask{
-			upperLevel:              &level,
-			upperLevelSstIds:        []uint{selectedSST},
-			lowerLevel:              level + 1,
-			lowerLevelSstIds:        c.FindOverlappingSsts(snapshot, []uint{selectedSST}, uint(level+1)),
-			isLowerLevelBottomLevel: level+1 == c.options.MaxLevels,
+			UpperLevel:              &level,
+			UpperLevelSstIds:        []uint{selectedSST},
+			LowerLevel:              level + 1,
+			LowerLevelSstIds:        c.FindOverlappingSsts(snapshot, []uint{selectedSST}, uint(level+1)),
+			IsLowerLevelBottomLevel: level+1 == c.options.MaxLevels,
 		}
 	}
 
@@ -156,4 +156,115 @@ type priority struct {
 
 func (t LeveledCompactionTask) TaskType() string {
 	return "LeveledCompactionTask"
+}
+
+func (c *LeveledCompactionController) ApplyCompactionResult(
+	storage *LsmStorageInner,
+	task *LeveledCompactionTask,
+	newSSTs []*SsTable,
+	inRecovery bool,
+) error {
+	storage.state.Lock()
+	defer storage.state.Unlock()
+
+	// Delete SST metadata (always), and delete file (only if not in recovery)
+	deleteSST := func(id uint) {
+		tbl, ok := storage.LsmStorageState.sstables[id]
+		if !ok {
+			return
+		}
+		if !inRecovery {
+			fileName := storage.path_of_sst(tbl.ID)
+			if err := os.Remove(fileName); err != nil {
+				fmt.Println("file delete failure:", err)
+			}
+		}
+		delete(storage.LsmStorageState.sstables, id)
+	}
+
+	// Delete upper and lower level SSTs from metadata (and optionally file)
+	for _, id := range task.UpperLevelSstIds {
+		deleteSST(id)
+	}
+	for _, id := range task.LowerLevelSstIds {
+		deleteSST(id)
+	}
+
+	// Remove old SST ids from upper level
+	if task.UpperLevel == nil {
+		// L0 compaction
+		remain := make([]uint, 0)
+		toDelete := make(map[uint]struct{})
+		for _, id := range task.UpperLevelSstIds {
+			toDelete[id] = struct{}{}
+		}
+		for _, id := range storage.LsmStorageState.l0_sstables {
+			if _, ok := toDelete[id]; !ok {
+				remain = append(remain, id)
+			}
+		}
+		storage.LsmStorageState.l0_sstables = remain
+	} else {
+		level := *task.UpperLevel - 1
+		remain := make([]uint, 0)
+		toDelete := make(map[uint]struct{})
+		for _, id := range task.UpperLevelSstIds {
+			toDelete[id] = struct{}{}
+		}
+		for _, id := range storage.LsmStorageState.levels[level].SSTables {
+			if _, ok := toDelete[id]; !ok {
+				remain = append(remain, id)
+			}
+		}
+		storage.LsmStorageState.levels[level].SSTables = remain
+		storage.LsmStorageState.levels[level].LevelNum = len(remain)
+	}
+
+	// Remove old SST ids from lower level
+	lower := task.LowerLevel - 1
+	remain := make([]uint, 0)
+	toDelete := make(map[uint]struct{})
+	for _, id := range task.LowerLevelSstIds {
+		toDelete[id] = struct{}{}
+	}
+	for _, id := range storage.LsmStorageState.levels[lower].SSTables {
+		if _, ok := toDelete[id]; !ok {
+			remain = append(remain, id)
+		}
+	}
+
+	// Merge new SSTs into lower level
+	oldSSTs := remain
+	get := func(id uint) *SsTable {
+		return storage.LsmStorageState.sstables[id]
+	}
+	merged := make([]uint, 0, len(oldSSTs)+len(newSSTs))
+	i, j := 0, 0
+
+	for i < len(oldSSTs) && j < len(newSSTs) {
+		old := get(oldSSTs[i])
+		newSst := newSSTs[j]
+		if inRecovery || bytes.Compare(old.FirstKey, newSst.FirstKey) < 0 {
+			merged = append(merged, old.ID)
+			i++
+		} else {
+			storage.LsmStorageState.sstables[newSst.ID] = newSst
+			merged = append(merged, newSst.ID)
+			j++
+		}
+	}
+	for ; i < len(oldSSTs); i++ {
+		merged = append(merged, oldSSTs[i])
+	}
+	for ; j < len(newSSTs); j++ {
+		newSst := newSSTs[j]
+		storage.LsmStorageState.sstables[newSst.ID] = newSst
+		merged = append(merged, newSst.ID)
+	}
+
+	// Update lower level metadata
+	storage.LsmStorageState.levels[lower].SSTables = merged
+	storage.LsmStorageState.levels[lower].LevelNum = len(merged)
+
+	return nil
 }

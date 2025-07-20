@@ -89,6 +89,10 @@ func main() {
 			)
 			cnt := 0
 			for iter.Valid() {
+				if len(iter.Value()) == 0 {
+					iter.Next()
+					continue
+				}
 				cnt++
 				k := bytesToUint64(iter.Key())
 				fmt.Printf("%d=%s\n", k, string(iter.Value()))
@@ -119,6 +123,23 @@ func main() {
 			lsmEngine.ForceFullCompaction()
 		} else if line == "dump" {
 			lsmEngine.Dump()
+		} else if strings.HasPrefix(line, "delete ") {
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) != 2 {
+				fmt.Println("invalid command")
+				continue
+			}
+			keyInt, err := strconv.ParseUint(parts[1], 10, 64)
+			if err != nil {
+				fmt.Println("invalid key")
+				continue
+			}
+			key := uint64ToBytes(keyInt)
+			lsmEngine.Put(key, []byte{})
+		} else if line == "json" {
+			pkg.DoJson(lsmEngine)
+		} else if line == "close" {
+			lsmEngine.Close()
 		} else {
 			fmt.Println("invalid command:", line)
 		}

@@ -57,9 +57,6 @@ func (mt *MemTable) Len() uint {
 
 func (mt *MemTable) Flush(builder *SsTableBuilder) {
 	for node := mt.Map.Front(); node != nil; node = node.Next() {
-		if len(node.Value.([]byte)) == 0 {
-			continue
-		}
 		builder.add(node.Key().([]byte), node.Value.([]byte))
 	}
 	if len(builder.first_key) > 0 {

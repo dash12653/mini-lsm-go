@@ -89,14 +89,14 @@ func (mi *MergeIterator) advance() {
 		key := it.Key()
 		val := it.Value()
 
-		// Skip entries that are logically deleted (empty value)
-		if val == nil || len(val) == 0 {
-			err := it.Next()
-			if err == nil && it.Valid() {
-				heap.Push(&mi.minHeap, heapItem{iter: it, index: item.index})
-			}
-			continue
-		}
+		//// Skip entries that are logically deleted (empty value)
+		//if val == nil || len(val) == 0 {
+		//	err := it.Next()
+		//	if err == nil && it.Valid() {
+		//		heap.Push(&mi.minHeap, heapItem{iter: it, index: item.index})
+		//	}
+		//	continue
+		//}
 
 		// Skip duplicate keys to only return the newest version
 		if mi.lastKey != nil && bytes.Equal(key, mi.lastKey) {
@@ -112,7 +112,7 @@ func (mi *MergeIterator) advance() {
 		mi.currentValue = val
 		mi.valid = true
 		mi.lastKey = append([]byte(nil), key...)
-		// fmt.Println("value in merge iter: ", string(val))
+
 		// Advance the iterator for the current item to prepare for next call
 		err := it.Next()
 		if err == nil && it.Valid() {
