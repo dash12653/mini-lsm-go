@@ -1,1 +1,1 @@
-# mini-lsm-go
+This project is a lightweight, educational key-value store based on **LSM-Tree (Log-Structured Merge Tree)**, implemented entirely in **Go**. It is designed as a learning project to explore the internal mechanics of modern storage engines.
