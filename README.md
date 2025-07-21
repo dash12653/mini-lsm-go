@@ -15,3 +15,7 @@ This project is a lightweight, educational key-value store based on **LSM-Tree (
 - [ ] Improve Testing  
 - [ ] Implement Bloom Filter  
 - [ ] Implement MVCC Support  
+
+## Reference
+
+This project is mainly based on the excellent [Mini-LSM tutorial by Skyzh](https://skyzh.github.io/mini-lsm/00-preface.html).
