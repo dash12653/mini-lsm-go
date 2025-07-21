@@ -79,17 +79,28 @@ func (lsm *MiniLsm) Dump() {
 }
 
 func Open() *MiniLsm {
+	path := "./data/"
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		err = os.MkdirAll(path, 0755)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create directory %s: %v", path, err))
+		}
+	}
+
+	manifestFile := filepath.Join(path, "manifest.json")
 	inner := &LsmStorageInner{
 		state:           sync.RWMutex{},
 		LsmStorageState: NewLsmStorageState(),
-		Options:         &LsmStorageOptions{block_size: 32, target_sst_size: 256, num_memtable_limit: 3}, // Test: 64 + 256
+		Options:         &LsmStorageOptions{block_size: 32, target_sst_size: 256, num_memtable_limit: 3, enabelWal: true}, // Test: 64 + 256
 		compactionController: NewLeveledCompactionController(LeveledCompactionOptions{
 			levelSizeMultiplier:            2,
 			Level0FileNumCompactionTrigger: 3,
 			MaxLevels:                      10,
 			BaseLevelSizeMb:                2,
 		}),
-		manifest: NewManifest("manifest.json"),
+		path:     path,
+		manifest: NewManifest(manifestFile),
 	}
 
 	//NewSimpleLeveledCompactionController(&SimpleLeveledCompactionOptions{
@@ -115,9 +126,7 @@ func Open() *MiniLsm {
 		compactionWg:     sync.WaitGroup{},
 	}
 
-	path := "manifest.json"
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+	file, err := os.OpenFile(manifestFile, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		fmt.Println("Failed to open or create file:", err)
 	}
@@ -126,37 +135,59 @@ func Open() *MiniLsm {
 		return nil
 	}
 
-	records, err := Recover("manifest.json")
+	records, err := Recover(manifestFile)
 	if err != nil {
 		panic(err)
 	}
 
 	if len(records) == 0 {
+		if inner.Options.enabelWal {
+			inner.LsmStorageState.memtable = NewMemTableWithWal(0, inner.path)
+		} else {
+			inner.LsmStorageState.memtable = NewMemTable(0)
+		}
+
+		err = inner.manifest.AddRecord(&NewMemTableRecord{0})
+		if err != nil {
+			panic(err)
+		}
+
 		lsm.SpawnFlushThread()
 		lsm.SpawnCompactionThread()
 		return lsm
 	}
 
 	for _, record := range records {
-		switch record.(type) {
+		switch r := record.(type) {
 		case NewMemTableRecord:
-			fmt.Println("To be implemented.")
+			// init or force freeze
+			if lsm.inner.LsmStorageState.memtable == nil {
+				memTable := &MemTable{id: r.ID}
+				lsm.inner.LsmStorageState.memtable = memTable
+				continue
+			}
+			currentMemTable := lsm.inner.LsmStorageState.memtable
+			id := r.ID // new memTableID
+			memTable := &MemTable{id: id}
+			lsm.inner.LsmStorageState.imm_memtables = append(lsm.inner.LsmStorageState.imm_memtables, currentMemTable)
+			lsm.inner.LsmStorageState.memtable = memTable
 		case CompactionRecord:
-			record2 := record.(CompactionRecord)
-			err = lsm.inner.compactionController.ApplyCompactionResult(lsm.inner, record2.CompactionTask, record2.SSTs, true)
+			err = lsm.inner.compactionController.ApplyCompactionResult(lsm.inner, r.CompactionTask, r.SSTs, true)
 			if err != nil {
 				return nil
 			}
 		case FlushRecord:
-			id := record.(FlushRecord).ID
+			id := r.ID
 			t := &SsTable{ID: id}
 			lsm.inner.LsmStorageState.sstables[id] = t
 			lsm.inner.LsmStorageState.l0_sstables = append(lsm.inner.LsmStorageState.l0_sstables, id)
+			inner.LsmStorageState.imm_memtables = inner.LsmStorageState.imm_memtables[1:]
 		default:
 			fmt.Println("Unknown record: ", record)
 		}
 	}
 
+	// lsm.Dump()
 	mx := uint(0)
 	// LoadSSTableFromFile
 	for _, ID := range inner.LsmStorageState.l0_sstables {
@@ -179,9 +210,29 @@ func Open() *MiniLsm {
 		}
 	}
 
-	lsm.inner.LsmStorageState.memtable = NewMemTable(mx + 1)
+	// recover immMemTable
+	for i, immTable := range inner.LsmStorageState.imm_memtables {
+		inner.LsmStorageState.imm_memtables[i] = immTable.RecoverFromWal(immTable.id, inner.path)
+	}
 
-	lsm.inner.nextSSTId.Add(uint64(mx + 1))
+	// recover current memTable
+	if inner.LsmStorageState.memtable != nil {
+		inner.LsmStorageState.memtable = inner.LsmStorageState.memtable.RecoverFromWal(inner.LsmStorageState.memtable.id, inner.path)
+		lsm.inner.nextSSTId.Add(uint64(mx))
+	} else {
+		if inner.Options.enabelWal {
+			inner.LsmStorageState.memtable = NewMemTableWithWal(mx+1, inner.path)
+		} else {
+			inner.LsmStorageState.memtable = NewMemTable(mx + 1)
+		}
+
+		err = inner.manifest.AddRecord(&NewMemTableRecord{mx + 1})
+		if err != nil {
+			panic(err)
+		}
+
+		lsm.inner.nextSSTId.Add(uint64(mx + 1))
+	}
 
 	lsm.SpawnFlushThread()
 	lsm.SpawnCompactionThread()
@@ -197,11 +248,14 @@ func (lsm *MiniLsm) Close() {
 	close(lsm.compactionStopCh)
 	lsm.flushWg.Wait()
 	lsm.compactionWg.Wait()
-	lsm.inner.force_freeze_memtable()
-	for len(lsm.inner.LsmStorageState.imm_memtables) > 0 {
-		lsm.inner.force_flush_next_memtable()
+	if !lsm.inner.Options.enabelWal {
+		lsm.inner.force_freeze_memtable()
+		for len(lsm.inner.LsmStorageState.imm_memtables) > 0 {
+			lsm.inner.force_flush_next_memtable()
+		}
 	}
-	fmt.Println("lsm closed.")
+
+	fmt.Print("engine closed.")
 	os.Exit(0)
 }
 
@@ -229,7 +283,7 @@ type LsmStorageState struct {
 
 func NewLsmStorageState() *LsmStorageState {
 	return &LsmStorageState{
-		memtable:      NewMemTable(0),
+		// memtable:      NewMemTable(0),
 		imm_memtables: make([]*MemTable, 0),
 		l0_sstables:   make([]uint, 0),
 		id:            0,
@@ -262,7 +316,7 @@ type LsmStorageOptions struct {
 	// Maximum number of memtables in memory, flush to L0 when exceeding this limit
 	num_memtable_limit uint
 	//pub compaction_options: CompactionOptions,
-	enable_wal bool
+	enabelWal bool
 	// compaction type
 	compactionOptions compactionOptions
 }
@@ -364,10 +418,21 @@ func (lsi *LsmStorageInner) force_freeze_memtable() {
 	if lsi.LsmStorageState.memtable.Map.Len() == 0 {
 		return
 	}
-	mem_table_id := lsi.NextSSTId()
-	new_mem_table := NewMemTable(mem_table_id)
+
+	newMemTableId := lsi.NextSSTId()
+	var newMemTable *MemTable
+	if lsi.Options.enabelWal {
+		newMemTable = NewMemTableWithWal(newMemTableId, lsi.path)
+	} else {
+		newMemTable = NewMemTable(newMemTableId)
+	}
+
 	lsi.LsmStorageState.imm_memtables = append(lsi.LsmStorageState.imm_memtables, lsi.LsmStorageState.memtable)
-	lsi.LsmStorageState.memtable = new_mem_table
+	lsi.LsmStorageState.memtable = newMemTable
+	err := lsi.manifest.AddRecord(&NewMemTableRecord{newMemTableId})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (lsi *LsmStorageInner) Scan(lower []byte, upper []byte) StorageIterator {
@@ -453,6 +518,13 @@ func (lsi *LsmStorageInner) force_flush_next_memtable() {
 	err := lsi.manifest.AddRecord(&FlushRecord{sst_id})
 	if err != nil {
 		panic(err)
+	}
+	// if wal is enabled, delete memTableID.wal after flushing.
+	if lsi.Options.enabelWal {
+		fileName := filepath.Join(lsi.path, fmt.Sprintf("%05d.wal", flush_memtable.id))
+		if err = os.Remove(fileName); err != nil {
+			fmt.Println("file delete failure:", err)
+		}
 	}
 }
 
@@ -779,6 +851,11 @@ func (lsi *LsmStorageInner) compact(task compactionTask) []*SsTable {
 		if err != nil {
 			return nil
 		}
+		err = lsi.manifest.AddRecord(&CompactionRecord{t, SSTables})
+		if err != nil {
+			panic(err)
+		}
+
 	default:
 		fmt.Println("Unknown CompactionTask")
 	}

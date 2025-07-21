@@ -40,11 +40,7 @@ func (lsi *LsmStorageInner) triggerCompaction() {
 		return
 	}
 
-	SSTables := lsi.compact(task)
-	err := lsi.manifest.AddRecord(&CompactionRecord{task, SSTables})
-	if err != nil {
-		return
-	}
+	lsi.compact(task)
 	return
 }
 

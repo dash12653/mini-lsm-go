@@ -3,13 +3,16 @@ package pkg
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"github.com/huandu/skiplist"
+	"path/filepath"
 )
 
 // MemTable wrapper of skip list
 // todo: it's not thread-safe, need to substitute it with a thread-safe skip-list implementation.
 type MemTable struct {
 	Map             *skiplist.SkipList // skip list
+	wal             *Wal               // Wal
 	id              uint               // id of this MemTable
 	ApproximateSize uint               // approximate size
 }
@@ -36,8 +39,46 @@ func NewMemTable(id uint) *MemTable {
 	}
 }
 
+// NewMemTableWithWal initialize an empty skiplist with a Wal and return.
+func NewMemTableWithWal(id uint, path string) *MemTable {
+	fileName := filepath.Join(path, fmt.Sprintf("%05d.wal", id))
+	wal, err := NewWal(fileName)
+	if err != nil {
+		panic(err)
+	}
+	return &MemTable{
+		Map: skiplist.New(&ByteSliceComparator{}),
+		wal: wal,
+		id:  id,
+	}
+}
+
+// RecoverFromWal creates a memtable from Wal.
+func (m *MemTable) RecoverFromWal(id uint, path string) *MemTable {
+	fileName := filepath.Join(path, fmt.Sprintf("%05d.wal", id))
+	m.Map = skiplist.New(&ByteSliceComparator{})
+	wal, approximateSize, err := RecoverSkipList(fileName, m.Map)
+	if err != nil {
+		panic(err)
+	}
+	m.wal = wal
+
+	return &MemTable{
+		Map:             m.Map,
+		wal:             wal,
+		id:              id,
+		ApproximateSize: approximateSize,
+	}
+}
+
 func (mt *MemTable) Put(key []byte, value []byte) {
 	mt.Map.Set(key, value)
+	if mt.wal != nil {
+		err := mt.wal.Put(key, value)
+		if err != nil {
+			panic(err)
+		}
+	}
 	estimzted_size := len(key) + len(value)
 	mt.ApproximateSize += uint(estimzted_size)
 }
