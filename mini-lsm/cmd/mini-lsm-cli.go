@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func uint64ToBytes(num uint64) []byte {
@@ -47,12 +48,14 @@ func main() {
 				fmt.Println("invalid range")
 				continue
 			}
+			start := time.Now()
 			for i := begin; i <= end; i++ {
 				key := uint64ToBytes(i)
 				val := []byte(fmt.Sprintf("value%d@%dvaluevaluevalue", i, epoch))
 				lsmEngine.Put(key, val)
 			}
-			fmt.Printf("%d values filled with epoch %d\n", end-begin+1, epoch)
+			duration := time.Since(start)
+			fmt.Printf("%d values filled with epoch %d in %v\n", end-begin+1, epoch, duration)
 		} else if strings.HasPrefix(line, "get ") {
 			parts := strings.SplitN(line, " ", 2)
 			if len(parts) != 2 {
@@ -65,11 +68,13 @@ func main() {
 				continue
 			}
 			key := uint64ToBytes(keyInt)
+			start := time.Now()
 			val := lsmEngine.Get(key)
+			duration := time.Since(start)
 			if val == nil {
 				fmt.Printf("%d not exist\n", keyInt)
 			} else {
-				fmt.Printf("%d=%s\n", keyInt, string(val))
+				fmt.Printf("%d=%s (get took %v)\n", keyInt, string(val), duration)
 			}
 		} else if strings.HasPrefix(line, "scan ") {
 			parts := strings.SplitN(line, " ", 3)
@@ -83,6 +88,7 @@ func main() {
 				fmt.Println("invalid range")
 				continue
 			}
+			start := time.Now()
 			iter := lsmEngine.Scan(
 				uint64ToBytes(startInt),
 				uint64ToBytes(endInt),
@@ -98,7 +104,8 @@ func main() {
 				fmt.Printf("%d=%s\n", k, string(iter.Value()))
 				iter.Next()
 			}
-			fmt.Println("scan cnt: ", cnt)
+			duration := time.Since(start)
+			fmt.Printf("scan cnt: %d, time: %v\n", cnt, duration)
 		} else if strings.HasPrefix(line, "put ") {
 			parts := strings.SplitN(line, " ", 3)
 			if len(parts) != 3 {
@@ -112,8 +119,10 @@ func main() {
 			}
 			key := uint64ToBytes(keyInt)
 			val := []byte(parts[2])
+			start := time.Now()
 			lsmEngine.Put(key, val)
-			fmt.Printf("Put key=%d value=%s\n", keyInt, parts[2])
+			duration := time.Since(start)
+			fmt.Printf("Put key=%d value=%s in %v\n", keyInt, parts[2], duration)
 		} else if line == "quit" {
 			lsmEngine.Close()
 			break

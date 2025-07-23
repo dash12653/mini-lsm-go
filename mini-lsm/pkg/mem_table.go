@@ -72,15 +72,15 @@ func (m *MemTable) RecoverFromWal(id uint, path string) *MemTable {
 }
 
 func (mt *MemTable) Put(key []byte, value []byte) {
-	mt.Map.Set(key, value)
 	if mt.wal != nil {
 		err := mt.wal.Put(key, value)
 		if err != nil {
 			panic(err)
 		}
 	}
-	estimzted_size := len(key) + len(value)
-	mt.ApproximateSize += uint(estimzted_size)
+	mt.Map.Set(key, value)
+	estimatedSize := len(key) + len(value)
+	mt.ApproximateSize += uint(estimatedSize)
 }
 
 // Get gets key's corresponding value

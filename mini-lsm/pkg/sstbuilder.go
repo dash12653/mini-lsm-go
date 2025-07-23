@@ -11,6 +11,7 @@ type SsTableBuilder struct {
 	data       []byte
 	meta       []BlockMeta
 	block_size uint
+	keyHashes  []uint32
 }
 
 func NewSsTableBuilder(block_size uint) *SsTableBuilder {
@@ -21,6 +22,7 @@ func NewSsTableBuilder(block_size uint) *SsTableBuilder {
 		block_size: block_size,
 		meta:       make([]BlockMeta, 0),
 		builder:    NewBlockBuilder(block_size),
+		keyHashes:  make([]uint32, 0),
 	}
 }
 
@@ -42,6 +44,7 @@ func (s *SsTableBuilder) add(key, value []byte) {
 		}
 		// if return true, update s.last_key
 		s.last_key = append([]byte{}, key...)
+		s.keyHashes = append(s.keyHashes, Hash(key))
 		return
 	}
 
@@ -53,6 +56,7 @@ func (s *SsTableBuilder) add(key, value []byte) {
 	}
 	s.first_key = append([]byte{}, key...)
 	s.last_key = append([]byte{}, key...)
+	s.keyHashes = append(s.keyHashes, Hash(key))
 }
 
 func (s *SsTableBuilder) finish_block() {
@@ -82,17 +86,25 @@ func (s *SsTableBuilder) finish_block() {
 
 func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 	buf := s.data
-	meta_offset := uint64(len(s.data))
+	metaOffset := uint64(len(s.data))
 
 	// step 1. iterate s.meta
 	buf = append(buf, EncodeBlockMeta(s.meta)...)
 
 	// Step 2: Append meta offset (last 4 bytes)
-	meta_offset_bytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(meta_offset_bytes, meta_offset)
-	buf = append(buf, meta_offset_bytes...)
+	metaOffsetBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(metaOffsetBytes, metaOffset)
+	buf = append(buf, metaOffsetBytes...)
 
-	// step 3: initialize a file object
+	// Step 3: Append bloom raw data
+	bloom := BuildFromKeyHashes(s.keyHashes, BloomBitsPerKey(len(s.keyHashes), 0.01))
+	bloomOffset := len(buf)
+
+	// Step 4: Append bloomOffset
+	bloom.Encode(&buf)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(bloomOffset))
+
+	// step 5: initialize a file object
 	fo, err := NewFileObject(path, buf)
 	if err != nil {
 		panic(err)
@@ -108,9 +120,10 @@ func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 		ID:              id,
 		File:            fo,
 		BlockMeta:       s.meta,
-		BlockMetaOffset: meta_offset,
+		BlockMetaOffset: metaOffset,
 		FirstKey:        firstKey,
 		LastKey:         lastKey,
+		BloomFilter:     bloom,
 	}
 }
 

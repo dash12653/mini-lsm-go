@@ -349,36 +349,52 @@ func (lsi *LsmStorageInner) Get(key []byte) ([]byte, bool) {
 	}
 
 	// step 3. try to find key in level 0 sst
-	SSTIters := make([]StorageIterator, 0)
 	for _, v := range lsi.LsmStorageState.l0_sstables {
-		sstable := lsi.LsmStorageState.sstables[v]
-		iter := Create_and_seek_to_key(sstable, key)
-		SSTIters = append(SSTIters, iter)
-	}
+		SsT := lsi.LsmStorageState.sstables[v]
+		if bytes.Compare(key, SsT.FirstKey) < 0 || bytes.Compare(key, SsT.LastKey) > 0 {
+			continue
+		}
 
-	SSTMergeIters := NewMergeIteratorFromBoundIterators(SSTIters)
-	if SSTMergeIters.Valid() && bytes.Equal(SSTMergeIters.Key(), key) {
-		if len(SSTMergeIters.Value()) == 0 {
-			return nil, false
+		if !SsT.BloomFilter.MayContain(Hash(key)) {
+			continue
 		}
-		return SSTMergeIters.Value(), true
-	}
 
-	// step 4. try to find key in level 1 - maxLevel.
-	for _, level := range lsi.LsmStorageState.levels {
-		SsTables := make([]*SsTable, 0)
-		for m := 0; m < len(level.SSTables); m++ {
-			SsTables = append(SsTables, lsi.LsmStorageState.sstables[level.SSTables[m]])
-		}
-		iter, err := NewSstConcatIteratorSeekToKey(SsTables, key)
-		if err != nil {
-			panic(err)
-		}
-		if iter != nil && iter.Valid() && bytes.Compare(iter.Key(), key) == 0 {
-			if len(iter.Value()) == 0 {
-				return nil, false
-			}
+		iter := Create_and_seek_to_key(SsT, key)
+		if iter.Valid() && len(iter.Value()) > 0 {
 			return iter.Value(), true
+		}
+	}
+
+	keyHash := Hash(key)
+
+	// step 4. try to find this key in level 1 - maxLevel
+	for _, level := range lsi.LsmStorageState.levels {
+		SsTableIDs := level.SSTables
+		left, right := 0, len(SsTableIDs)-1
+
+		for left <= right {
+			mid := (left + right) / 2
+			sst := lsi.LsmStorageState.sstables[SsTableIDs[mid]]
+
+			switch {
+			case bytes.Compare(key, sst.FirstKey) < 0:
+				right = mid - 1
+			case bytes.Compare(key, sst.LastKey) > 0:
+				left = mid + 1
+			default:
+				if !sst.BloomFilter.MayContain(keyHash) {
+					break
+				}
+
+				iter := Create_and_seek_to_key(sst, key)
+				if iter != nil && iter.Valid() && bytes.Equal(iter.Key(), key) {
+					if len(iter.Value()) == 0 {
+						return nil, false // tombstone
+					}
+					return iter.Value(), true
+				}
+				break
+			}
 		}
 	}
 
@@ -997,44 +1013,42 @@ func DoJson(lsm *MiniLsm) {
 }
 
 func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
-	// 打开文件
+	// 1. 打开文件
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sst file: %w", err)
 	}
 
-	// 获取文件大小
+	// 2. 获取文件大小
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat sst file: %w", err)
 	}
-
 	size := info.Size()
-	if size < 8 {
+	if size < 12 {
 		return nil, fmt.Errorf("sst file too small")
 	}
 
-	// 构造 FileObject
-	fileObj := &FileObject{
-		File: file,
-		Size: size,
+	// 3. 读取最后 4 字节：BloomOffset
+	bloomOffsetBytes := make([]byte, 4)
+	if _, err := file.ReadAt(bloomOffsetBytes, size-4); err != nil {
+		return nil, fmt.Errorf("failed to read bloom offset: %w", err)
 	}
+	bloomOffset := binary.BigEndian.Uint32(bloomOffsetBytes)
 
-	// 读取 BlockMetaOffset（文件最后 8 字节）
-	tail := make([]byte, 8)
-	if _, err := file.ReadAt(tail, size-8); err != nil {
-		return nil, fmt.Errorf("failed to read block meta offset: %w", err)
+	// 4. 读取 metaOffset（位于 bloomOffset - 8）
+	metaOffsetBytes := make([]byte, 8)
+	if _, err := file.ReadAt(metaOffsetBytes, int64(bloomOffset)-8); err != nil {
+		return nil, fmt.Errorf("failed to read meta offset: %w", err)
 	}
-	blockMetaOffset := binary.BigEndian.Uint64(tail)
+	metaOffset := binary.BigEndian.Uint64(metaOffsetBytes)
 
-	// 从 BlockMetaOffset 开始读取 BlockMeta 区域（直到 size-8）
-	metaLen := uint64(size) - 8 - blockMetaOffset
-	metaBytes, err := fileObj.Read(blockMetaOffset, metaLen)
-	if err != nil {
+	// 5. 读取 BlockMeta
+	metaLen := int64(bloomOffset) - 8 - int64(metaOffset)
+	metaBytes := make([]byte, metaLen)
+	if _, err := file.ReadAt(metaBytes, int64(metaOffset)); err != nil {
 		return nil, fmt.Errorf("failed to read block meta: %w", err)
 	}
-
-	// Decode block meta
 	blockMeta, err := DecodeBlockMeta(metaBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode block meta: %w", err)
@@ -1043,15 +1057,26 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 		return nil, fmt.Errorf("no block meta found")
 	}
 
-	// 构造 SsTable 对象
-	table := &SsTable{
+	// 6. 读取 Bloom raw data（从 bloomOffset 开始，一直到 size - 4）
+	bloomLen := size - 4 - int64(bloomOffset)
+	bloomBytes := make([]byte, bloomLen)
+	if _, err := file.ReadAt(bloomBytes, int64(bloomOffset)); err != nil {
+		return nil, fmt.Errorf("failed to read bloom filter: %w", err)
+	}
+	bloom := DecodeBloom(bloomBytes)
+
+	// 7. 构造 SsTable
+	fileObj := &FileObject{File: file, Size: size}
+	firstKey := blockMeta[0].First_key
+	lastKey := blockMeta[len(blockMeta)-1].Last_key
+
+	return &SsTable{
+		ID:              id,
 		File:            fileObj,
 		BlockMeta:       blockMeta,
-		BlockMetaOffset: blockMetaOffset,
-		ID:              id,
-		FirstKey:        blockMeta[0].First_key,
-		LastKey:         blockMeta[len(blockMeta)-1].Last_key,
-	}
-
-	return table, nil
+		BlockMetaOffset: metaOffset,
+		BloomFilter:     bloom,
+		FirstKey:        firstKey,
+		LastKey:         lastKey,
+	}, nil
 }

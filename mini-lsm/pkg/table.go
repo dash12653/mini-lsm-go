@@ -42,14 +42,14 @@ type SsTable struct {
 	// Unique ID of the SSTable
 	ID uint
 
-	// Optional block cache to avoid redundant disk reads
-	// BlockCache *BlockCache // 可以为 nil，表示不使用缓存
-
 	// The smallest key in the entire SST file
 	FirstKey []byte
 
 	// The largest key in the entire SST file
 	LastKey []byte
+
+	// Bloom Filter
+	BloomFilter *Bloom
 }
 
 // NewFileObject writes data with specified dir and return corresponding FileObject
