@@ -1,51 +1,74 @@
 package pkg
 
 import (
-	"bytes"
 	"encoding/binary"
+	"fmt"
 )
 
 type BlockIterator struct {
 	// reference to the block
 	block Block
 	// the current key at the iterator position
-	key []byte
+	key *Key
 	// the value range from the block
-	value_range [2]uint
+	valueRange [2]uint
 	// the current index at the iterator position
 	idx uint
 }
 
-func create_block_iterator(block *Block) *BlockIterator {
+// getFirstKey extracts the first key from the block's data.
+// block entry layout: overlap len | remain len | key | ts ....
+func (b *Block) getFirstKey() *Key {
+	// First Key, no overlap, ignore it.
+	buf := b.Data
+	buf = buf[2:]
+
+	// Decode key length.
+	keyLen := binary.BigEndian.Uint16(buf[:2])
+	buf = buf[2:]
+
+	// Decode key
+	key := buf[:keyLen]
+	buf = buf[keyLen:]
+
+	// Decode timestamp
+	ts := binary.BigEndian.Uint64(buf[:8])
+	return NewKeyWithTS(key, ts)
+}
+
+func NewBlockIterator(block *Block) *BlockIterator {
 	return &BlockIterator{
-		block:       *block,
-		key:         make([]byte, 0),
-		value_range: [2]uint{0, 0},
-		idx:         0,
+		block:      *block,
+		key:        nil,
+		valueRange: [2]uint{0, 0},
+		idx:        0,
 	}
 }
 
-func Create_and_seek_to_first(block *Block) *BlockIterator {
-	iter := create_block_iterator(block)
-	iter.seek_to_first()
+func NewAndSeekToFirst(block *Block) *BlockIterator {
+	iter := NewBlockIterator(block)
+	iter.seekToFirst()
 	return iter
 }
 
-func Create_and_seek_to_key_to_be_updated(block *Block, key []byte) *BlockIterator {
-	iter := create_block_iterator(block)
-	iter.seek_to_key(key)
+func NewAndSeekToKey(block *Block, key *Key) *BlockIterator {
+	iter := NewBlockIterator(block)
+	iter.seekToKey(key)
 	return iter
 }
 
-func (iter *BlockIterator) seek_to_key(target []byte) {
+func (iter *BlockIterator) seekToKey(target *Key) {
 	low, high := uint(0), uint(len(iter.block.Offset))
 	for low < high {
 		mid := low + (high-low)/uint(2)
-		iter.seek_to(mid)
+		err := iter.seekTo(mid)
+		if err != nil {
+			panic(err)
+		}
 		if !iter.Valid() {
 			break
 		}
-		switch bytes.Compare(iter.Key(), target) {
+		switch iter.key.Compare(target) {
 		case -1:
 			low = mid + 1
 		case 1:
@@ -57,65 +80,83 @@ func (iter *BlockIterator) seek_to_key(target []byte) {
 	if low >= uint(len(iter.block.Offset)) {
 		iter.key = nil
 	} else {
-		iter.seek_to(low)
+		err := iter.seekTo(low)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
-func (iter *BlockIterator) seek_to_first() {
-	iter.seek_to(0)
+func (iter *BlockIterator) seekToFirst() {
+	err := iter.seekTo(0)
+	if err != nil {
+		panic(err)
+	}
 }
 
-func (iter *BlockIterator) seek_to(idx uint) error {
+func (iter *BlockIterator) seekTo(idx uint) error {
 	// if idx is out of index, set valid to false
 	if idx >= uint(len(iter.block.Offset)) {
 		iter.key = nil
-		iter.value_range = [2]uint{0, 0}
+		iter.valueRange = [2]uint{0, 0}
 		return nil
 	}
 	// seek to a valid index
 	offset := uint(iter.block.Offset[idx])
-	err := iter.seek_to_offset(offset)
+	err := iter.seekToOffset(offset)
 	if err != nil {
 		iter.key = nil
-		iter.value_range = [2]uint{0, 0}
+		iter.valueRange = [2]uint{0, 0}
 		return err
 	}
 	iter.idx = idx
 	return nil
 }
 
-func (iter *BlockIterator) seek_to_offset(offset uint) error {
-	// entry layout:
-	// key length, key, value length, value
-
-	// decode from the first byte of this entry.
+func (iter *BlockIterator) seekToOffset(offset uint) error {
 	data := iter.block.Data[offset:]
 
-	// decode length of key
-	key_len := binary.BigEndian.Uint16(data)
-	data = data[2:]
+	if len(data) < 4 {
+		return fmt.Errorf("invalid entry: not enough data for key headers")
+	}
 
-	// decode key
-	key := make([]byte, key_len)
-	copy(key, data[:key_len])
-	iter.key = key
-	data = data[key_len:]
+	// 1. Decode key_overlap_len and remaining_key_len
+	keyOverlapLen := binary.BigEndian.Uint16(data[:2])
+	remainingKeyLen := binary.BigEndian.Uint16(data[2:4])
+	cursor := 4
 
-	// decode length of value
-	value_len := binary.BigEndian.Uint16(data)
-	data = data[2:]
+	// overlap len + remain len + ts + value len
+	if len(data) < cursor+int(remainingKeyLen)+8+2 {
+		return fmt.Errorf("invalid entry: incomplete key/timestamp/value length")
+	}
 
-	// get value range
-	iter.value_range[0] = offset + 2 + uint(key_len) + 2
-	iter.value_range[1] = iter.value_range[0] + uint(value_len)
+	// 2. Reconstruct the full key using FirstKey and remaining part
+	fullKey := make([]byte, keyOverlapLen+remainingKeyLen)
+	copy(fullKey, iter.block.getFirstKey().Key[:keyOverlapLen])               // copy prefix from firstKey
+	copy(fullKey[keyOverlapLen:], data[cursor:(cursor+int(remainingKeyLen))]) // copy remaining key bytes
+	cursor += int(remainingKeyLen)
+
+	// 3. Decode timestamp
+	ts := binary.BigEndian.Uint64(data[cursor : cursor+8])
+	cursor += 8
+
+	// 4. Decode value_len
+	valueLen := binary.BigEndian.Uint16(data[cursor : cursor+2])
+	cursor += 2
+
+	// 5. Set key and value range
+	iter.key = &Key{Key: fullKey, TS: ts}
+	iter.valueRange[0] = offset + uint(cursor)
+	iter.valueRange[1] = iter.valueRange[0] + uint(valueLen)
+
 	return nil
 }
 
 func (iter *BlockIterator) Valid() bool {
-	return !(iter.key == nil) && !(len(iter.key) == 0)
+	return !(iter.key == nil) && !(iter.key.KeyLen() == 0)
 }
 
-func (iter *BlockIterator) Key() []byte {
+func (iter *BlockIterator) Key() *Key {
 	if !iter.Valid() {
 		panic("invalid iterator: key is empty")
 		return nil
@@ -127,12 +168,12 @@ func (iter *BlockIterator) Value() []byte {
 	if !iter.Valid() {
 		panic("invalid iterator: key is empty")
 	}
-	return iter.block.Data[iter.value_range[0]:iter.value_range[1]]
+	return iter.block.Data[iter.valueRange[0]:iter.valueRange[1]]
 }
 
 func (iter *BlockIterator) Next() error {
 	iter.idx++
-	err := iter.seek_to(iter.idx)
+	err := iter.seekTo(iter.idx)
 	if err != nil {
 		return err
 	}

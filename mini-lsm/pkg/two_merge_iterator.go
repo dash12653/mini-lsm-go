@@ -7,12 +7,12 @@ import (
 // TwoMergeIterator Merges two iterators of different types into one.
 // If the two iterators have the same key, only produce the key once and prefer the entry from A.
 type TwoMergeIterator struct {
-	a        StorageIterator
-	b        StorageIterator
-	choose_a bool
+	a       StorageIterator
+	b       StorageIterator
+	chooseA bool
 }
 
-func (t *TwoMergeIterator) if_choose_a() bool {
+func (t *TwoMergeIterator) ifChooseA() bool {
 	if !t.a.Valid() {
 		return false
 	}
@@ -23,7 +23,7 @@ func (t *TwoMergeIterator) if_choose_a() bool {
 	return bytes.Compare(t.a.Key(), t.b.Key()) <= 0
 }
 
-func (it *TwoMergeIterator) skip_b() error {
+func (it *TwoMergeIterator) skipB() error {
 	if it.a.Valid() {
 		if it.b.Valid() && bytes.Equal(it.b.Key(), it.a.Key()) {
 			if err := it.b.Next(); err != nil {
@@ -36,47 +36,47 @@ func (it *TwoMergeIterator) skip_b() error {
 
 func NewTwoMergeIterator(a, b StorageIterator) StorageIterator {
 	iter := &TwoMergeIterator{
-		a:        a,
-		b:        b,
-		choose_a: false,
+		a:       a,
+		b:       b,
+		chooseA: false,
 	}
 
-	if err := iter.skip_b(); err != nil {
+	if err := iter.skipB(); err != nil {
 		return nil
 	}
 
-	iter.choose_a = iter.if_choose_a()
+	iter.chooseA = iter.ifChooseA()
 
 	return iter
 }
 
 func (it *TwoMergeIterator) Valid() bool {
-	if it.choose_a {
+	if it.chooseA {
 		return it.a.Valid()
 	}
 	return it.b.Valid()
 }
 
 func (it *TwoMergeIterator) Next() error {
-	if it.choose_a {
+	if it.chooseA {
 		it.a.Next()
 	} else {
 		it.b.Next()
 	}
-	it.skip_b()
-	it.choose_a = it.if_choose_a()
+	it.skipB()
+	it.chooseA = it.ifChooseA()
 	return nil
 }
 
 func (it *TwoMergeIterator) Key() []byte {
-	if it.choose_a {
+	if it.chooseA {
 		return it.a.Key()
 	}
 	return it.b.Key()
 }
 
 func (it *TwoMergeIterator) Value() []byte {
-	if it.choose_a {
+	if it.chooseA {
 		return it.a.Value()
 	}
 	return it.b.Value()

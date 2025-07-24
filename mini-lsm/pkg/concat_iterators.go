@@ -66,7 +66,7 @@ func NewSstConcatIteratorSeekToKey(ssts []*SsTable, key []byte) (*SstConcatItera
 		}, nil
 	}
 
-	iter := Create_and_seek_to_key(ssts[idx], key)
+	iter := CreateAndSeekToKey(ssts[idx], key)
 	sc := &SstConcatIterator{
 		SsTables:   ssts,
 		Current:    iter,
@@ -92,7 +92,7 @@ func (iter *SstConcatIterator) moveUntilValid() error {
 			return nil
 		}
 		// Next SST
-		nextIter := Create_and_seek_to_first_(iter.SsTables[iter.NextSstIdx])
+		nextIter := CreateAndSeekToFirst(iter.SsTables[iter.NextSstIdx])
 		iter.Current = nextIter
 		iter.NextSstIdx++
 	}
@@ -112,7 +112,7 @@ func NewSstConcatIterSeekToFirst(ssts []*SsTable) (*SstConcatIterator, error) {
 		return iter, nil
 	}
 
-	firstIter := Create_and_seek_to_first_(ssts[0])
+	firstIter := CreateAndSeekToFirst(ssts[0])
 	iter.Current = firstIter
 	iter.NextSstIdx = 1
 

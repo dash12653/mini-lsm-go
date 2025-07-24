@@ -43,10 +43,10 @@ type SsTable struct {
 	ID uint
 
 	// The smallest key in the entire SST file
-	FirstKey []byte
+	FirstKey *Key
 
 	// The largest key in the entire SST file
-	LastKey []byte
+	LastKey *Key
 
 	// Bloom Filter
 	BloomFilter *Bloom
@@ -83,7 +83,7 @@ func NewFileObject(path string, data []byte) (*FileObject, error) {
 	}, nil
 }
 
-func (s *SsTable) Read_block(idx uint64) (*Block, error) {
+func (s *SsTable) ReadBlock(idx uint64) (*Block, error) {
 	// get start offset
 	offset := s.BlockMeta[idx].Offset
 
@@ -106,13 +106,13 @@ func (s *SsTable) Read_block(idx uint64) (*Block, error) {
 	return block, nil
 }
 
-// Find Find_block_idx block that may contain `key`.
-func (s *SsTable) Find_block_idx(key []byte) uint64 {
+// Find_block_idx finds block that may contain `key`.
+func (s *SsTable) Find_block_idx(key *Key) uint64 {
 	// 实现 partition_point
 	low, high := 0, len(s.BlockMeta)
 	for low < high {
 		mid := (low + high) / 2
-		if bytes.Compare(s.BlockMeta[mid].First_key, key) <= 0 {
+		if s.BlockMeta[mid].FirstKey.Compare(key) <= 0 {
 			low = mid + 1
 		} else {
 			high = mid
@@ -125,9 +125,9 @@ func (s *SsTable) Find_block_idx(key []byte) uint64 {
 }
 
 type BlockMeta struct {
-	Offset    uint64
-	First_key []byte
-	Last_key  []byte
+	Offset   uint64
+	FirstKey *Key
+	LastKey  *Key
 }
 
 // EncodeBlockMeta encodes a slice of BlockMeta into a byte buffer.
@@ -135,16 +135,37 @@ func EncodeBlockMeta(metas []BlockMeta) []byte {
 	buf := new(bytes.Buffer)
 
 	for _, meta := range metas {
-		// Write Offset
-		binary.Write(buf, binary.BigEndian, meta.Offset)
+		// Encode Offset
+		err := binary.Write(buf, binary.BigEndian, meta.Offset)
+		if err != nil {
+			panic("failed to encode block meta")
+		}
 
-		// Write FirstKey
-		binary.Write(buf, binary.BigEndian, uint16(len(meta.First_key)))
-		buf.Write(meta.First_key)
+		// Encode FirstKey len
+		err = binary.Write(buf, binary.BigEndian, uint16(len(meta.FirstKey.Key)))
+		if err != nil {
+			panic("failed to encode meta FirstKey len.")
+		}
+		// Encode FirstKey
+		buf.Write(meta.FirstKey.Key)
+		// Encode FirstKey TS
+		err = binary.Write(buf, binary.BigEndian, meta.FirstKey.TS)
+		if err != nil {
+			panic("failed to encode meta FirstKey TS.")
+		}
 
-		// Write LastKey
-		binary.Write(buf, binary.BigEndian, uint16(len(meta.Last_key)))
-		buf.Write(meta.Last_key)
+		// Encode LastKey len
+		err = binary.Write(buf, binary.BigEndian, uint16(len(meta.LastKey.Key)))
+		if err != nil {
+			panic("failed to encode meta LastKey len.")
+		}
+		// Encode LastKey
+		buf.Write(meta.LastKey.Key)
+		// Encode LastKey TS
+		err = binary.Write(buf, binary.BigEndian, meta.LastKey.TS)
+		if err != nil {
+			panic("failed to encode meta LastKey len.")
+		}
 	}
 
 	return buf.Bytes()
@@ -159,33 +180,50 @@ func DecodeBlockMeta(data []byte) ([]BlockMeta, error) {
 		var offset uint64
 		var firstKeyLen, lastKeyLen uint16
 
-		// Read Offset
+		// 1. Read offset
 		if err := binary.Read(buf, binary.BigEndian, &offset); err != nil {
 			return nil, fmt.Errorf("failed to read offset: %w", err)
 		}
 
-		// Read FirstKey
+		// 2. Read the length of FirstKey
 		if err := binary.Read(buf, binary.BigEndian, &firstKeyLen); err != nil {
 			return nil, fmt.Errorf("failed to read firstKeyLen: %w", err)
 		}
-		firstKey := make([]byte, firstKeyLen)
-		if _, err := buf.Read(firstKey); err != nil {
-			return nil, fmt.Errorf("failed to read firstKey: %w", err)
+		firstKeyBytes := make([]byte, firstKeyLen)
+		if _, err := io.ReadFull(buf, firstKeyBytes); err != nil {
+			return nil, fmt.Errorf("failed to read firstKey bytes: %w", err)
 		}
 
-		// Read LastKey
+		// 3. Read the timestamp (TS) of FirstKey
+		var firstKeyTS uint64
+		if err := binary.Read(buf, binary.BigEndian, &firstKeyTS); err != nil {
+			return nil, fmt.Errorf("failed to read firstKey TS: %w", err)
+		}
+
+		// 4. Read the length of LastKey
 		if err := binary.Read(buf, binary.BigEndian, &lastKeyLen); err != nil {
 			return nil, fmt.Errorf("failed to read lastKeyLen: %w", err)
 		}
-		lastKey := make([]byte, lastKeyLen)
-		if _, err := buf.Read(lastKey); err != nil {
-			return nil, fmt.Errorf("failed to read lastKey: %w", err)
+		lastKeyBytes := make([]byte, lastKeyLen)
+		if _, err := io.ReadFull(buf, lastKeyBytes); err != nil {
+			return nil, fmt.Errorf("failed to read lastKey bytes: %w", err)
 		}
 
+		// 5. Read the timestamp (TS) of LastKey
+		var lastKeyTS uint64
+		if err := binary.Read(buf, binary.BigEndian, &lastKeyTS); err != nil {
+			return nil, fmt.Errorf("failed to read lastKey TS: %w", err)
+		}
+
+		// 6. Construct Key objects for FirstKey and LastKey
+		firstKey := &Key{Key: firstKeyBytes, TS: firstKeyTS}
+		lastKey := &Key{Key: lastKeyBytes, TS: lastKeyTS}
+
+		// 7. Append the decoded BlockMeta to the result slice
 		metas = append(metas, BlockMeta{
-			Offset:    offset,
-			First_key: firstKey,
-			Last_key:  lastKey,
+			Offset:   offset,
+			FirstKey: firstKey,
+			LastKey:  lastKey,
 		})
 	}
 

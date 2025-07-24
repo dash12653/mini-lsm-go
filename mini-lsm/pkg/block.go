@@ -14,11 +14,8 @@ The `actual` storage format is as below (After `Block::encode`):
 ----------------------------------------------------------------------------------------------------
 
 for each entry the storage format is as below:
------------------------------------------------------------------------
-|                           Entry #1                            | ... |
------------------------------------------------------------------------
-| key_len (2B) | key (keylen) | value_len (2B) | value (varlen) | ... |
------------------------------------------------------------------------
+
+Key_overlap_len (u16) | remaining_key_len (u16) | key (remaining_key_len) | timestamp (u64)| value_length(u16) | value
 
 At the end of each block, we will store the offsets of each entry and the total number of entries.
 For example, if the first entry is at 0th position of the block, and the second entry is at 12th position of the block.
@@ -55,6 +52,8 @@ func (b *Block) Encode() []byte {
 	return buf
 }
 
+// Decode deserializes raw data to a block struct
+// It's used when recovering a Sst from a Sst file to struct SsTable
 func Decode(data []byte) *Block {
 	const sizeOfU16 = 2
 

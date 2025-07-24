@@ -359,7 +359,7 @@ func (lsi *LsmStorageInner) Get(key []byte) ([]byte, bool) {
 			continue
 		}
 
-		iter := Create_and_seek_to_key(SsT, key)
+		iter := CreateAndSeekToKey(SsT, key)
 		if iter.Valid() && len(iter.Value()) > 0 {
 			return iter.Value(), true
 		}
@@ -386,7 +386,7 @@ func (lsi *LsmStorageInner) Get(key []byte) ([]byte, bool) {
 					break
 				}
 
-				iter := Create_and_seek_to_key(sst, key)
+				iter := CreateAndSeekToKey(sst, key)
 				if iter != nil && iter.Valid() && bytes.Equal(iter.Key(), key) {
 					if len(iter.Value()) == 0 {
 						return nil, false // tombstone
@@ -474,7 +474,7 @@ func (lsi *LsmStorageInner) Scan(lower []byte, upper []byte) StorageIterator {
 	for i := len(lsi.LsmStorageState.l0_sstables) - 1; i >= 0; i-- {
 		sst_id := lsi.LsmStorageState.l0_sstables[i]
 		sstable := lsi.LsmStorageState.sstables[sst_id]
-		iter := Create_and_seek_to_key(sstable, lower)
+		iter := CreateAndSeekToKey(sstable, lower)
 		SSTIters = append(SSTIters, iter)
 	}
 
@@ -560,7 +560,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 	l0SSTablesIters := make([]StorageIterator, 0)
 	length := len(lsi.LsmStorageState.l0_sstables)
 	for i := length - 1; i >= 0; i-- {
-		iter := Create_and_seek_to_first_(lsi.LsmStorageState.sstables[l0SSTables[i]])
+		iter := CreateAndSeekToFirst(lsi.LsmStorageState.sstables[l0SSTables[i]])
 		l0SSTablesIters = append(l0SSTablesIters, iter)
 	}
 	a := NewMergeIteratorFromBoundIterators(l0SSTablesIters)
@@ -786,7 +786,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 		l0SSTablesIters := make([]StorageIterator, 0)
 		length := len(l0SsTables)
 		for i := length - 1; i >= 0; i-- {
-			iter := Create_and_seek_to_first_(lsi.LsmStorageState.sstables[l0SsTables[i]])
+			iter := CreateAndSeekToFirst(lsi.LsmStorageState.sstables[l0SsTables[i]])
 			l0SSTablesIters = append(l0SSTablesIters, iter)
 		}
 		a = NewMergeIteratorFromBoundIterators(l0SSTablesIters)
@@ -1067,8 +1067,8 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 
 	// 7. 构造 SsTable
 	fileObj := &FileObject{File: file, Size: size}
-	firstKey := blockMeta[0].First_key
-	lastKey := blockMeta[len(blockMeta)-1].Last_key
+	firstKey := blockMeta[0].FirstKey
+	lastKey := blockMeta[len(blockMeta)-1].LastKey
 
 	return &SsTable{
 		ID:              id,

@@ -71,14 +71,24 @@ func (m *MemTable) RecoverFromWal(id uint, path string) *MemTable {
 	}
 }
 
+func CloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp
+}
+
 func (mt *MemTable) Put(key []byte, value []byte) {
+	k, v := CloneBytes(key), CloneBytes(value)
 	if mt.wal != nil {
-		err := mt.wal.Put(key, value)
+		err := mt.wal.Put(k, v)
 		if err != nil {
 			panic(err)
 		}
 	}
-	mt.Map.Set(key, value)
+	mt.Map.Set(k, v)
 	estimatedSize := len(key) + len(value)
 	mt.ApproximateSize += uint(estimatedSize)
 }
@@ -107,7 +117,7 @@ func (mt *MemTable) Flush(builder *SsTableBuilder) {
 }
 
 type StorageIterator interface {
-	Key() []byte
+	Key() *Key
 	Value() []byte
 	Next() error
 	Valid() bool

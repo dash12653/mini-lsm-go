@@ -1,101 +1,101 @@
 package pkg
 
 type SsTableIterator struct {
-	table    *SsTable
-	blk_iter *BlockIterator
-	blk_idx  uint64
+	table   *SsTable
+	blkIter *BlockIterator
+	blkIdx  uint64
 }
 
-func seek_to_first_inner(table *SsTable) (uint64, *BlockIterator) {
-	first_block, err := table.Read_block(0)
+func seekToFirstInner(table *SsTable) (uint64, *BlockIterator) {
+	firstBlock, err := table.ReadBlock(0)
 	if err != nil {
-		return 0, nil
+		panic("cannot seek to first block")
 	}
-	return 0, Create_and_seek_to_first(first_block)
+	return 0, NewAndSeekToFirst(firstBlock)
 }
 
-func Create_and_seek_to_first_(table *SsTable) *SsTableIterator {
-	blk_idx, blk_iter := seek_to_first_inner(table)
+func CreateAndSeekToFirst(table *SsTable) *SsTableIterator {
+	blkIdx, blkIter := seekToFirstInner(table)
 	return &SsTableIterator{
-		table:    table,
-		blk_idx:  blk_idx,
-		blk_iter: blk_iter,
+		table:   table,
+		blkIdx:  blkIdx,
+		blkIter: blkIter,
 	}
 }
 
-func seek_to_key_inner(table *SsTable, key []byte) (uint64, *BlockIterator) {
-	blk_idx := table.Find_block_idx(key)
-	b, err := table.Read_block(blk_idx)
+func seekToKeyInner(table *SsTable, key *Key) (uint64, *BlockIterator) {
+	blkIdx := table.Find_block_idx(key)
+	b, err := table.ReadBlock(blkIdx)
 	if err != nil {
 		return 0, nil
 	}
-	blk_iter := Create_and_seek_to_key_to_be_updated(b, key)
-	if !blk_iter.Valid() {
-		blk_idx += 1
-		if blk_idx < uint64(len(table.BlockMeta)) {
-			b, err = table.Read_block(blk_idx)
+	blkIter := NewAndSeekToKey(b, key)
+	if !blkIter.Valid() {
+		blkIdx += 1
+		if blkIdx < uint64(len(table.BlockMeta)) {
+			b, err = table.ReadBlock(blkIdx)
 			if err != nil {
 				return 0, nil
 			}
-			blk_iter = Create_and_seek_to_first(b)
+			blkIter = NewAndSeekToFirst(b)
 		}
 	}
-	return blk_idx, blk_iter
+	return blkIdx, blkIter
 }
 
-func Create_and_seek_to_key(table *SsTable, key []byte) *SsTableIterator {
-	blk_idx, blk_iter := seek_to_key_inner(table, key)
+func CreateAndSeekToKey(table *SsTable, key *Key) *SsTableIterator {
+	blkIdx, blkIter := seekToKeyInner(table, key)
 	return &SsTableIterator{
-		table:    table,
-		blk_idx:  blk_idx,
-		blk_iter: blk_iter,
+		table:   table,
+		blkIdx:  blkIdx,
+		blkIter: blkIter,
 	}
 }
 
-func (it *SsTableIterator) seek_to_first() {
-	blk_idx, blk_iter := seek_to_first_inner(it.table)
-	it.blk_idx = blk_idx
-	it.blk_iter = blk_iter
+func (it *SsTableIterator) seekToFirst() {
+	blkIdx, blkIter := seekToFirstInner(it.table)
+	it.blkIdx = blkIdx
+	it.blkIter = blkIter
 }
 
 // Seek to the first key-value pair which >= `key`.
-func (it *SsTableIterator) seek_to_key(key []byte) {
-	it.blk_idx, it.blk_iter = seek_to_key_inner(it.table, key)
+func (it *SsTableIterator) seekToKey(key *Key) {
+	it.blkIdx, it.blkIter = seekToKeyInner(it.table, key)
 }
 
 func (it *SsTableIterator) Next() error {
-	err := it.blk_iter.Next()
+	err := it.blkIter.Next()
 	if err != nil {
 		return err
 	}
 
-	if !it.blk_iter.Valid() {
-		it.blk_idx++
-		if it.blk_idx < uint64(len(it.table.BlockMeta)) {
-			b, err := it.table.Read_block(it.blk_idx)
+	if !it.blkIter.Valid() {
+		it.blkIdx++
+		if it.blkIdx < uint64(len(it.table.BlockMeta)) {
+			b, err := it.table.ReadBlock(it.blkIdx)
 			if err != nil {
 				return err
 			}
-			it.blk_iter = Create_and_seek_to_first(b)
+			it.blkIter = NewAndSeekToFirst(b)
 		}
 	}
 	return nil
 }
 
 func (it *SsTableIterator) Valid() bool {
-	return it.blk_iter != nil && it.blk_iter.Valid()
+	return it.blkIter != nil && it.blkIter.Valid()
 }
 
-func (it *SsTableIterator) Key() []byte {
+func (it *SsTableIterator) Key() *Key {
 	if !it.Valid() {
 		return nil
 	}
-	return it.blk_iter.Key()
+	return it.blkIter.Key()
 }
 
 func (it *SsTableIterator) Value() []byte {
 	if !it.Valid() {
 		return nil
 	}
-	return it.blk_iter.Value()
+	return it.blkIter.Value()
 }

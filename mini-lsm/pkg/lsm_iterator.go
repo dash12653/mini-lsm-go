@@ -5,39 +5,39 @@ import (
 )
 
 type LsmIterator struct {
-	inner     *TwoMergeIterator
-	end_bound []byte
-	is_valid  bool
+	inner    *TwoMergeIterator
+	endBound []byte
+	isValid  bool
 }
 
 func NewLsmIterator(inner *TwoMergeIterator, end_bound []byte) *LsmIterator {
-	iter := &LsmIterator{inner: inner, end_bound: end_bound, is_valid: inner.Valid()}
-	iter.move_to_non_delete()
+	iter := &LsmIterator{inner: inner, endBound: end_bound, isValid: inner.Valid()}
+	iter.moveToNonDelete()
 	return iter
 }
 
-func (iter *LsmIterator) move_to_non_delete() {
-	for iter.is_valid && len(iter.inner.Value()) == 0 {
-		iter.next_inner()
+func (iter *LsmIterator) moveToNonDelete() {
+	for iter.isValid && len(iter.inner.Value()) == 0 {
+		iter.nextInner()
 	}
 	return
 }
 
-func (iter *LsmIterator) next_inner() {
+func (iter *LsmIterator) nextInner() {
 	iter.inner.Next()
 	if !iter.inner.Valid() {
-		iter.is_valid = false
+		iter.isValid = false
 		return
 	}
-	if iter.end_bound != nil && bytes.Compare(iter.Key(), iter.end_bound) >= 0 {
-		iter.is_valid = false
+	if iter.endBound != nil && bytes.Compare(iter.Key(), iter.endBound) >= 0 {
+		iter.isValid = false
 		return
 	}
 	return
 }
 
 func (li *LsmIterator) Is_valid() bool {
-	return li.is_valid
+	return li.isValid
 }
 
 func (li *LsmIterator) Key() []byte {
@@ -49,7 +49,7 @@ func (li *LsmIterator) Value() []byte {
 }
 
 func (li *LsmIterator) Next() error {
-	li.next_inner()
-	li.move_to_non_delete()
+	li.nextInner()
+	li.moveToNonDelete()
 	return nil
 }

@@ -30,12 +30,12 @@ func TestSSTable_BuildAndReadBlock(t *testing.T) {
 	assert.True(t, len(sst.BlockMeta) > 1)
 
 	// Test reading first block from SSTable
-	block, err := sst.Read_block(0)
+	block, err := sst.ReadBlock(0)
 	assert.NoError(t, err)
 	assert.NotNil(t, block)
 
 	// Create an iterator and seek to first entry
-	iter := Create_and_seek_to_first(block)
+	iter := NewAndSeekToFirst(block)
 	assert.True(t, iter.Valid(), "Iterator should be valid at first entry")
 }
 
@@ -73,8 +73,8 @@ func TestSSTable_FindBlockIdx(t *testing.T) {
 // Test encoding and decoding of BlockMeta slice preserves data integrity
 func TestSSTable_MetaEncodeDecode(t *testing.T) {
 	originalMetas := []BlockMeta{
-		{Offset: 0, First_key: []byte("a"), Last_key: []byte("m")},
-		{Offset: 100, First_key: []byte("n"), Last_key: []byte("z")},
+		{Offset: 0, FirstKey: []byte("a"), LastKey: []byte("m")},
+		{Offset: 100, FirstKey: []byte("n"), LastKey: []byte("z")},
 	}
 
 	// Encode metadata to bytes
@@ -105,11 +105,11 @@ func TestSSTable_SingleBlockRoundtrip(t *testing.T) {
 	sst := builder.build(3, path)
 
 	// Read back the single block
-	block, err := sst.Read_block(0)
+	block, err := sst.ReadBlock(0)
 	assert.NoError(t, err)
 
 	// Iterate all entries in block to verify keys and values
-	iter := Create_and_seek_to_first(block)
+	iter := NewAndSeekToFirst(block)
 	expected := map[string]string{
 		"apple":  "fruit",
 		"banana": "fruit",
@@ -147,12 +147,12 @@ func TestSSTable_Iterator(t *testing.T) {
 	sstable := builder.build(1, "test_sst_file")
 
 	for i := 0; i < len(sstable.BlockMeta); i++ {
-		block, err := sstable.Read_block(uint64(i))
+		block, err := sstable.ReadBlock(uint64(i))
 		if err != nil {
 			t.Fatalf("failed to read block %d: %v", i, err)
 		}
 
-		iter := Create_and_seek_to_first(block)
+		iter := NewAndSeekToFirst(block)
 
 		// iterate over this block and check keys/values
 		for iter.Valid() {

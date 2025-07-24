@@ -42,7 +42,7 @@ func TestBlockBuilderAndIterator(t *testing.T) {
 	block := createSampleBlock()
 
 	// === Test seek_to_first ===
-	iter := Create_and_seek_to_first(block)
+	iter := NewAndSeekToFirst(block)
 	if !iter.Valid() {
 		t.Fatal("iterator should be valid at first entry")
 	}
@@ -58,7 +58,7 @@ func TestBlockBuilderAndIterator(t *testing.T) {
 		"d": "date",
 	}
 	count := 0
-	iter = Create_and_seek_to_first(block)
+	iter = NewAndSeekToFirst(block)
 	for iter.Valid() {
 		k := string(iter.Key())
 		v := string(iter.Value())
@@ -73,19 +73,19 @@ func TestBlockBuilderAndIterator(t *testing.T) {
 	}
 
 	// === Test seek_to_key: exact match ===
-	iter = Create_and_seek_to_key_to_be_updated(block, []byte("b"))
+	iter = NewAndSeekToKey(block, []byte("b"))
 	if !iter.Valid() || !bytes.Equal(iter.Key(), []byte("b")) || !bytes.Equal(iter.Value(), []byte("banana")) {
 		t.Errorf("seek_to_key b failed, got key=%s value=%s", iter.Key(), iter.Value())
 	}
 
 	// === Test seek_to_key: non-existent key, should go to next greater ===
-	iter = Create_and_seek_to_key_to_be_updated(block, []byte("bb")) // should go to "c"
+	iter = NewAndSeekToKey(block, []byte("bb")) // should go to "c"
 	if !iter.Valid() || !bytes.Equal(iter.Key(), []byte("c")) {
 		t.Errorf("seek_to_key bb failed, expected to jump to key=c, got %s", iter.Key())
 	}
 
 	// === Test seek_to_key: beyond max, should become invalid ===
-	iter = Create_and_seek_to_key_to_be_updated(block, []byte("z"))
+	iter = NewAndSeekToKey(block, []byte("z"))
 	if iter.Valid() {
 		t.Errorf("seek_to_key z should result in invalid iterator, got key=%s", iter.Key())
 	}
@@ -105,7 +105,7 @@ func TestBlockEntryDecoding(t *testing.T) {
 		t.Fatalf("expected 1 offset, got %d", len(block.Offset))
 	}
 
-	iter := Create_and_seek_to_first(block)
+	iter := NewAndSeekToFirst(block)
 	if !iter.Valid() {
 		t.Fatalf("iterator should be valid after seek_to_first")
 	}
@@ -151,7 +151,7 @@ func TestBlockWithDuplicateKeys(t *testing.T) {
 	builder.Add([]byte("dup"), []byte("2"))
 	block := builder.Build()
 
-	iter := Create_and_seek_to_first(block)
+	iter := NewAndSeekToFirst(block)
 	if !iter.Valid() || !bytes.Equal(iter.Key(), []byte("dup")) {
 		t.Errorf("first key should be 'dup'")
 	}

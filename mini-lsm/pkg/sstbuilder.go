@@ -76,9 +76,9 @@ func (s *SsTableBuilder) finish_block() {
 
 	// append meta data
 	s.meta = append(s.meta, BlockMeta{
-		Offset:    offset,
-		First_key: firstKey,
-		Last_key:  lastKey,
+		Offset:   offset,
+		FirstKey: firstKey,
+		LastKey:  lastKey,
 	})
 	// append raw data
 	s.data = append(s.data, encodedBlock...)
@@ -110,11 +110,11 @@ func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 		panic(err)
 	}
 
-	firstKey := make([]byte, len(s.meta[0].First_key))
-	copy(firstKey, s.meta[0].First_key)
+	firstKey := make([]byte, len(s.meta[0].FirstKey))
+	copy(firstKey, s.meta[0].FirstKey)
 
-	lastKey := make([]byte, len(s.meta[len(s.meta)-1].Last_key))
-	copy(lastKey, s.meta[len(s.meta)-1].Last_key)
+	lastKey := make([]byte, len(s.meta[len(s.meta)-1].LastKey))
+	copy(lastKey, s.meta[len(s.meta)-1].LastKey)
 
 	return &SsTable{
 		ID:              id,

@@ -23,7 +23,7 @@ func TestMemtableFlushToSstAndReadTest(t *testing.T) {
 	PrintSSTMeta(tbl)
 
 	PrintSSTAll(tbl)
-	iter := Create_and_seek_to_key(tbl, uint64ToBytes(1))
+	iter := CreateAndSeekToKey(tbl, uint64ToBytes(1))
 	fmt.Println(bytesToUint64(tbl.FirstKey), bytesToUint64(tbl.LastKey))
 	for iter.Valid() {
 		fmt.Println(iter.Key(), string(iter.Value()))
@@ -96,9 +96,9 @@ func PrintSSTMeta(sst *SsTable) error {
 		}
 
 		metas = append(metas, BlockMeta{
-			Offset:    offset,
-			First_key: firstKey,
-			Last_key:  lastKey,
+			Offset:   offset,
+			FirstKey: firstKey,
+			LastKey:  lastKey,
 		})
 	}
 
@@ -106,8 +106,8 @@ func PrintSSTMeta(sst *SsTable) error {
 	for i, meta := range metas {
 		fmt.Printf("BlockMeta #%d:\n", i)
 		fmt.Printf("  Offset: %d\n", meta.Offset)
-		fmt.Printf("  FirstKey: %d\n", bytesToUint64(meta.First_key))
-		fmt.Printf("  LastKey: %d\n", bytesToUint64(meta.Last_key))
+		fmt.Printf("  FirstKey: %d\n", bytesToUint64(meta.FirstKey))
+		fmt.Printf("  LastKey: %d\n", bytesToUint64(meta.LastKey))
 		fmt.Println()
 	}
 
@@ -223,9 +223,9 @@ func PrintSSTAll(sst *SsTable) error {
 		}
 
 		metas = append(metas, BlockMeta{
-			Offset:    offset,
-			First_key: firstKey,
-			Last_key:  lastKey,
+			Offset:   offset,
+			FirstKey: firstKey,
+			LastKey:  lastKey,
 		})
 	}
 
@@ -244,8 +244,8 @@ func PrintSSTAll(sst *SsTable) error {
 		}
 
 		fmt.Printf("Block %d (offset %d):\n", i, meta.Offset)
-		fmt.Printf("  FirstKey: %q\n", meta.First_key)
-		fmt.Printf("  LastKey: %q\n", meta.Last_key)
+		fmt.Printf("  FirstKey: %q\n", meta.FirstKey)
+		fmt.Printf("  LastKey: %q\n", meta.LastKey)
 		for j := 0; j < len(keys); j++ {
 			fmt.Printf("  KV %d: key=%q, value=%q\n", j, keys[j], values[j])
 		}
