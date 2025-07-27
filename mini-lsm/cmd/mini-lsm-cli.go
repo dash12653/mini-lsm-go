@@ -48,12 +48,15 @@ func main() {
 				fmt.Println("invalid range")
 				continue
 			}
+			keys, values := make([][]byte, 0), make([][]byte, 0)
 			start := time.Now()
 			for i := begin; i <= end; i++ {
 				key := uint64ToBytes(i)
 				val := []byte(fmt.Sprintf("value%d@%dvaluevaluevalue", i, epoch))
-				lsmEngine.Put(key, val)
+				keys = append(keys, key)
+				values = append(values, val)
 			}
+			lsmEngine.WriteBatch(keys, values)
 			duration := time.Since(start)
 			fmt.Printf("%d values filled with epoch %d in %v\n", end-begin+1, epoch, duration)
 		} else if strings.HasPrefix(line, "get ") {
@@ -100,7 +103,7 @@ func main() {
 					continue
 				}
 				cnt++
-				k := bytesToUint64(iter.Key())
+				k := bytesToUint64(iter.Key().Key)
 				fmt.Printf("%d=%s\n", k, string(iter.Value()))
 				iter.Next()
 			}

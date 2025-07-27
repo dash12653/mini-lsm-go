@@ -6,50 +6,98 @@ import (
 
 type LsmIterator struct {
 	inner    *TwoMergeIterator
-	endBound []byte
+	endBound *Key
+	readTs   uint64
 	isValid  bool
+	prevKey  []byte
 }
 
-func NewLsmIterator(inner *TwoMergeIterator, end_bound []byte) *LsmIterator {
-	iter := &LsmIterator{inner: inner, endBound: end_bound, isValid: inner.Valid()}
-	iter.moveToNonDelete()
+func NewLsmIterator(inner *TwoMergeIterator, endBound *Key, readTs uint64) *LsmIterator {
+	iter := &LsmIterator{
+		inner:    inner,
+		endBound: endBound,
+		readTs:   readTs,
+		prevKey:  nil,
+		isValid:  inner.Valid(),
+	}
 	return iter
 }
 
-func (iter *LsmIterator) moveToNonDelete() {
-	for iter.isValid && len(iter.inner.Value()) == 0 {
-		iter.nextInner()
-	}
-	return
-}
+// moveToNextValid 实现完整版本跳过逻辑
+func (it *LsmIterator) moveToNextValid() {
+	for {
+		if !it.inner.Valid() {
+			it.isValid = false
+			return
+		}
 
-func (iter *LsmIterator) nextInner() {
-	iter.inner.Next()
-	if !iter.inner.Valid() {
-		iter.isValid = false
+		curKey := it.inner.Key()
+
+		// 右闭区间判断
+		if it.endBound != nil && curKey.Compare(it.endBound) > 0 {
+			it.isValid = false
+			return
+		}
+
+		userKey, ts := curKey.Key, curKey.TS
+
+		// 时间戳比 readTs 新，跳过
+		if ts > it.readTs {
+			it.inner.Next()
+			continue
+		}
+
+		// 空值（tombstone），需要跳过整个 user key 的所有旧版本
+		if len(it.inner.Value()) == 0 {
+			it.skipCurrentUserKey(userKey)
+			continue
+		}
+
+		// 去重：已经访问过该 key
+		if it.prevKey != nil && bytes.Equal(userKey, it.prevKey) {
+			it.inner.Next()
+			continue
+		}
+
+		// 合法 key
+		it.prevKey = append([]byte(nil), userKey...)
+		it.isValid = true
 		return
 	}
-	if iter.endBound != nil && bytes.Compare(iter.Key(), iter.endBound) >= 0 {
-		iter.isValid = false
-		return
+}
+
+// skipCurrentUserKey 跳过当前 user key 的所有历史版本
+func (it *LsmIterator) skipCurrentUserKey(target []byte) {
+	for it.inner.Valid() {
+		if !bytes.Equal(it.inner.Key().Key, target) {
+			break
+		}
+		it.inner.Next()
 	}
-	return
 }
 
-func (li *LsmIterator) Is_valid() bool {
-	return li.isValid
+// Public API
+
+func (it *LsmIterator) Valid() bool {
+	return it.isValid
 }
 
-func (li *LsmIterator) Key() []byte {
-	return li.inner.Key()
+func (it *LsmIterator) Key() *Key {
+	if !it.isValid {
+		return nil
+	}
+	return it.inner.Key()
 }
 
-func (li *LsmIterator) Value() []byte {
-	return li.inner.Value()
+func (it *LsmIterator) Value() []byte {
+	if !it.isValid {
+		return nil
+	}
+	return it.inner.Value()
 }
 
-func (li *LsmIterator) Next() error {
-	li.nextInner()
-	li.moveToNonDelete()
+func (it *LsmIterator) Next() error {
+	it.inner.Next()
+	it.moveToNextValid()
 	return nil
 }

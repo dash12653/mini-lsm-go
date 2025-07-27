@@ -18,7 +18,7 @@ func TestMemtableFlushToSstAndReadTest(t *testing.T) {
 		value := []byte(fmt.Sprintf("val-%d", i))
 		builder.add(key, value)
 	}
-	builder.finish_block()
+	builder.finishBlock()
 	tbl := builder.build(1, "./123.txt")
 	PrintSSTMeta(tbl)
 

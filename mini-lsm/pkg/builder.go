@@ -127,7 +127,7 @@ func ComputeOverlap(firstKey, key *Key) int {
 		if i >= firstKey.KeyLen() || i >= key.KeyLen() {
 			break
 		}
-		if firstKey.KeyRef()[i] != key.KeyRef()[i] {
+		if firstKey.Key[i] != key.Key[i] {
 			break
 		}
 		i++

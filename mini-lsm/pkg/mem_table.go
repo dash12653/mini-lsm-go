@@ -22,7 +22,18 @@ type ByteSliceComparator struct{}
 func (c *ByteSliceComparator) Compare(lhs, rhs interface{}) int {
 	a := lhs.([]byte)
 	b := rhs.([]byte)
-	return bytes.Compare(a, b) // -1,0,1
+
+	l, err := DecodeKey(a)
+	if err != nil {
+		panic(err)
+	}
+
+	r, err := DecodeKey(b)
+	if err != nil {
+		panic(err)
+	}
+
+	return l.Compare(&r)
 }
 
 func (c *ByteSliceComparator) CalcScore(key interface{}) float64 {
@@ -80,24 +91,40 @@ func CloneBytes(b []byte) []byte {
 	return cp
 }
 
-func (mt *MemTable) Put(key []byte, value []byte) {
-	k, v := CloneBytes(key), CloneBytes(value)
+// Put puts a key-value pair into the memtable
+func (mt *MemTable) Put(key *Key, value []byte) {
+	k, v := CloneBytes(key.Encode()), CloneBytes(value)
 	if mt.wal != nil {
-		err := mt.wal.Put(k, v)
+		err := mt.wal.Put(key, v)
 		if err != nil {
 			panic(err)
 		}
 	}
 	mt.Map.Set(k, v)
-	estimatedSize := len(key) + len(value)
+	estimatedSize := len(k) + len(v)
 	mt.ApproximateSize += uint(estimatedSize)
 }
 
+//// Get gets key's corresponding value
+//func (mt *MemTable) Get(key *Key) ([]byte, bool) {
+//	ele := mt.Map.Get(key)
+//	if ele != nil {
+//		return ele.Value.([]byte), true
+//	}
+//	return nil, false
+//}
+
 // Get gets key's corresponding value
-func (mt *MemTable) Get(key []byte) ([]byte, bool) {
-	ele := mt.Map.Get(key)
-	if ele != nil {
-		return ele.Value.([]byte), true
+func (mt *MemTable) Get(key *Key) ([]byte, bool) {
+	newKey := NewKey()
+	newKey.SetFromSlice(key)
+	ele := mt.Map.Find(newKey)
+	found, err := DecodeKey(ele.Key().([]byte))
+	if err != nil {
+		panic(err)
+	}
+	if ele != nil && bytes.Compare(key.Key, found.Key) == 0 {
+		return CloneBytes(ele.Value.([]byte)), true
 	}
 	return nil, false
 }
@@ -108,10 +135,10 @@ func (mt *MemTable) Len() uint {
 
 func (mt *MemTable) Flush(builder *SsTableBuilder) {
 	for node := mt.Map.Front(); node != nil; node = node.Next() {
-		builder.add(node.Key().([]byte), node.Value.([]byte))
+		builder.add(node.Key().(*Key), node.Value.([]byte))
 	}
-	if len(builder.first_key) > 0 {
-		builder.finish_block()
+	if builder.firstKey != nil {
+		builder.finishBlock()
 	}
 	return
 }
@@ -127,16 +154,16 @@ type StorageIterator interface {
 type BoundedMemTableIterator struct {
 	list       *skiplist.SkipList
 	node       *skiplist.Element
-	upperBound []byte
+	upperBound *Key
 	valid      bool
 }
 
-func NewBoundedMemTableIterator(mt *MemTable, start []byte, upper []byte) *BoundedMemTableIterator {
+func NewBoundedMemTableIterator(mt *MemTable, start *Key, upper *Key) *BoundedMemTableIterator {
 	var node *skiplist.Element
 	if start == nil {
 		node = mt.Map.Front()
 	} else {
-		node = mt.Map.Find(start)
+		node = mt.Map.Find(start.Encode())
 	}
 
 	iter := &BoundedMemTableIterator{
@@ -145,10 +172,12 @@ func NewBoundedMemTableIterator(mt *MemTable, start []byte, upper []byte) *Bound
 		upperBound: upper,
 		valid:      node != nil,
 	}
-	if iter.valid && upper != nil && bytes.Compare(iter.Key(), upper) > 0 {
+
+	if iter.valid && upper != nil && iter.Key().Compare(upper) > 0 {
 		iter.valid = false
 		iter.node = nil
 	}
+
 	return iter
 }
 
@@ -156,11 +185,16 @@ func (it *BoundedMemTableIterator) Valid() bool {
 	return it.valid
 }
 
-func (it *BoundedMemTableIterator) Key() []byte {
+func (it *BoundedMemTableIterator) Key() *Key {
 	if !it.valid {
 		return nil
 	}
-	return it.node.Key().([]byte)
+	k := it.node.Key().([]byte)
+	k2, err := DecodeKey(k)
+	if err != nil {
+		panic(err)
+	}
+	return &k2
 }
 
 func (it *BoundedMemTableIterator) Value() []byte {
@@ -179,13 +213,13 @@ func (it *BoundedMemTableIterator) Next() error {
 		it.valid = false
 		return nil
 	}
-	if it.upperBound != nil && bytes.Compare(it.Key(), it.upperBound) > 0 {
+	if it.upperBound != nil && it.Key().Compare(it.upperBound) > 0 {
 		it.valid = false
 		it.node = nil
 	}
 	return nil
 }
 
-func (mt *MemTable) Scan(lower []byte, upper []byte) *BoundedMemTableIterator {
+func (mt *MemTable) Scan(lower *Key, upper *Key) *BoundedMemTableIterator {
 	return NewBoundedMemTableIterator(mt, lower, upper)
 }

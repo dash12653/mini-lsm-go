@@ -1,9 +1,5 @@
 package pkg
 
-import (
-	"bytes"
-)
-
 // TwoMergeIterator Merges two iterators of different types into one.
 // If the two iterators have the same key, only produce the key once and prefer the entry from A.
 type TwoMergeIterator struct {
@@ -20,12 +16,12 @@ func (t *TwoMergeIterator) ifChooseA() bool {
 		return true
 	}
 	// prefer entry from a
-	return bytes.Compare(t.a.Key(), t.b.Key()) <= 0
+	return t.a.Key().Compare(t.b.Key()) <= 0
 }
 
 func (it *TwoMergeIterator) skipB() error {
 	if it.a.Valid() {
-		if it.b.Valid() && bytes.Equal(it.b.Key(), it.a.Key()) {
+		if it.b.Valid() && it.a.Key().Compare(it.b.Key()) == 0 {
 			if err := it.b.Next(); err != nil {
 				return err
 			}
@@ -34,7 +30,7 @@ func (it *TwoMergeIterator) skipB() error {
 	return nil
 }
 
-func NewTwoMergeIterator(a, b StorageIterator) StorageIterator {
+func NewTwoMergeIterator(a, b StorageIterator) *TwoMergeIterator {
 	iter := &TwoMergeIterator{
 		a:       a,
 		b:       b,
@@ -68,7 +64,7 @@ func (it *TwoMergeIterator) Next() error {
 	return nil
 }
 
-func (it *TwoMergeIterator) Key() []byte {
+func (it *TwoMergeIterator) Key() *Key {
 	if it.chooseA {
 		return it.a.Key()
 	}

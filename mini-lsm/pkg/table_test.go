@@ -21,7 +21,7 @@ func TestSSTable_BuildAndReadBlock(t *testing.T) {
 	}
 
 	// Important: finalize last block after all adds
-	builder.finish_block()
+	builder.finishBlock()
 
 	// Build SSTable file on disk
 	sst := builder.build(1, path)
@@ -46,11 +46,11 @@ func TestSSTable_FindBlockIdx(t *testing.T) {
 	// Build two blocks with ranges [a,b] and [c,d]
 	builder.add([]byte("a"), []byte("1"))
 	builder.add([]byte("b"), []byte("2"))
-	builder.finish_block()
+	builder.finishBlock()
 
 	builder.add([]byte("c"), []byte("3"))
 	builder.add([]byte("d"), []byte("4"))
-	builder.finish_block()
+	builder.finishBlock()
 
 	sst := builder.build(2, "tmp_find_idx.sst")
 	defer os.Remove("tmp_find_idx.sst")
@@ -99,7 +99,7 @@ func TestSSTable_SingleBlockRoundtrip(t *testing.T) {
 	builder.add([]byte("apple"), []byte("fruit"))
 	builder.add([]byte("banana"), []byte("fruit"))
 	builder.add([]byte("carrot"), []byte("vegetable"))
-	builder.finish_block()
+	builder.finishBlock()
 
 	// Build SSTable and save to file
 	sst := builder.build(3, path)
@@ -142,7 +142,7 @@ func TestSSTable_Iterator(t *testing.T) {
 		builder.add(kv.key, kv.value)
 	}
 	// finish last block
-	builder.finish_block()
+	builder.finishBlock()
 
 	sstable := builder.build(1, "test_sst_file")
 

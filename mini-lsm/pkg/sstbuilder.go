@@ -6,8 +6,8 @@ import (
 
 type SsTableBuilder struct {
 	builder    BlockBuilder
-	first_key  []byte
-	last_key   []byte
+	firstKey   *Key
+	lastKey    *Key
 	data       []byte
 	meta       []BlockMeta
 	block_size uint
@@ -16,8 +16,8 @@ type SsTableBuilder struct {
 
 func NewSsTableBuilder(block_size uint) *SsTableBuilder {
 	return &SsTableBuilder{
-		first_key:  make([]byte, 0),
-		last_key:   make([]byte, 0),
+		firstKey:   nil,
+		lastKey:    nil,
 		data:       make([]byte, 0),
 		block_size: block_size,
 		meta:       make([]BlockMeta, 0),
@@ -34,32 +34,32 @@ The encoding of SST is like:
 | data block | ... | data block |            metadata           | meta block offset (u32) |
 -------------------------------------------------------------------------------------------
 */
-func (s *SsTableBuilder) add(key, value []byte) {
+func (s *SsTableBuilder) add(key *Key, value []byte) {
 
 	// try to add key-value pair into current block builder
 	if s.builder.Add(key, value) {
 		// check if first_key is empty
-		if len(s.first_key) == 0 {
-			s.first_key = append([]byte{}, key...)
+		if s.firstKey == nil {
+			s.firstKey = key
 		}
 		// if return true, update s.last_key
-		s.last_key = append([]byte{}, key...)
-		s.keyHashes = append(s.keyHashes, Hash(key))
+		s.lastKey = key
+		s.keyHashes = append(s.keyHashes, Hash(key.Encode()))
 		return
 	}
 
 	// now the current block builder is full. we need to finish building and create a new block builder.
-	s.finish_block()
+	s.finishBlock()
 	if !s.builder.Add(key, value) {
 		panic("Failed adding a kv-pair.")
 		return
 	}
-	s.first_key = append([]byte{}, key...)
-	s.last_key = append([]byte{}, key...)
-	s.keyHashes = append(s.keyHashes, Hash(key))
+	s.firstKey = key
+	s.lastKey = key
+	s.keyHashes = append(s.keyHashes, Hash(key.Encode()))
 }
 
-func (s *SsTableBuilder) finish_block() {
+func (s *SsTableBuilder) finishBlock() {
 	// get old block builder
 	oldBuilder := s.builder
 	// initialize a new block builder
@@ -69,10 +69,10 @@ func (s *SsTableBuilder) finish_block() {
 	// get new builder's offset
 	offset := uint64(len(s.data))
 
-	firstKey := s.first_key
-	s.first_key = nil
-	lastKey := s.last_key
-	s.last_key = nil
+	firstKey := s.firstKey
+	s.firstKey = nil
+	lastKey := s.lastKey
+	s.lastKey = nil
 
 	// append meta data
 	s.meta = append(s.meta, BlockMeta{
@@ -110,11 +110,8 @@ func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 		panic(err)
 	}
 
-	firstKey := make([]byte, len(s.meta[0].FirstKey))
-	copy(firstKey, s.meta[0].FirstKey)
-
-	lastKey := make([]byte, len(s.meta[len(s.meta)-1].LastKey))
-	copy(lastKey, s.meta[len(s.meta)-1].LastKey)
+	firstKey := s.meta[0].FirstKey.Clone()
+	lastKey := s.meta[len(s.meta)-1].LastKey.Clone()
 
 	return &SsTable{
 		ID:              id,

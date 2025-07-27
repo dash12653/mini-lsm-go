@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"sort"
@@ -42,10 +41,10 @@ func (c *LeveledCompactionController) FindOverlappingSsts(
 		fk := snapshot.sstables[id].FirstKey
 		lk := snapshot.sstables[id].LastKey
 
-		if bytes.Compare(fk, beginKey) < 0 {
+		if fk.Compare(beginKey) < 0 {
 			beginKey = fk
 		}
-		if bytes.Compare(lk, endKey) > 0 {
+		if lk.Compare(endKey) > 0 {
 			endKey = lk
 		}
 	}
@@ -58,7 +57,7 @@ func (c *LeveledCompactionController) FindOverlappingSsts(
 		lastKey := sst.LastKey
 
 		// If not (sst is entirely before or entirely after the range), then it overlaps
-		if !(bytes.Compare(lastKey, beginKey) < 0 || bytes.Compare(firstKey, endKey) > 0) {
+		if !(lastKey.Compare(beginKey) < 0 || firstKey.Compare(endKey) > 0) {
 			overlapSSTs = append(overlapSSTs, sstID)
 		}
 	}
@@ -244,7 +243,7 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 	for i < len(oldSSTs) && j < len(newSSTs) {
 		old := get(oldSSTs[i])
 		newSst := newSSTs[j]
-		if inRecovery || bytes.Compare(old.FirstKey, newSst.FirstKey) < 0 {
+		if inRecovery || old.FirstKey.Compare(newSst.FirstKey) < 0 {
 			merged = append(merged, old.ID)
 			i++
 		} else {

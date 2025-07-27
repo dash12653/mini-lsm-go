@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"bytes"
 	"fmt"
 )
 
@@ -15,17 +14,17 @@ type SstConcatIterator struct {
 }
 
 func checkSstValid(ssts []*SsTable) error {
-	// fmt.Println("checkSstValid, length: ", len(ssts))
 	for i := range ssts {
 		if ssts[i].FirstKey == nil || ssts[i].LastKey == nil {
 			return fmt.Errorf("sst index %d's lst or fst key  is nil", i)
 		}
-		if bytes.Compare(ssts[i].FirstKey, ssts[i].LastKey) > 0 {
+		if ssts[i].FirstKey.Compare(ssts[i].LastKey) > 0 {
 			return fmt.Errorf("invalid SSTable: first key > last key")
 		}
 	}
+
 	for i := 0; i < len(ssts)-1; i++ {
-		if bytes.Compare(ssts[i].LastKey, ssts[i+1].FirstKey) >= 0 {
+		if ssts[i].LastKey.Compare(ssts[i].FirstKey) >= 0 {
 			return fmt.Errorf("sstables overlap")
 		}
 	}
@@ -45,13 +44,13 @@ func partitionPoint(ssts []*SsTable, f func(*SsTable) bool) int {
 	return low
 }
 
-func NewSstConcatIteratorSeekToKey(ssts []*SsTable, key []byte) (*SstConcatIterator, error) {
+func NewSstConcatIteratorSeekToKey(ssts []*SsTable, key *Key) (*SstConcatIterator, error) {
 	if err := checkSstValid(ssts); err != nil {
 		return nil, err
 	}
 
 	idx := partitionPoint(ssts, func(sst *SsTable) bool {
-		return bytes.Compare(sst.FirstKey, key) <= 0
+		return sst.FirstKey.Compare(key) <= 0
 	})
 
 	if idx > 0 {
@@ -123,7 +122,7 @@ func NewSstConcatIterSeekToFirst(ssts []*SsTable) (*SstConcatIterator, error) {
 	return iter, nil
 }
 
-func (iter *SstConcatIterator) Key() []byte {
+func (iter *SstConcatIterator) Key() *Key {
 	return iter.Current.Key()
 }
 

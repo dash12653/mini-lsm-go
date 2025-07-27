@@ -73,7 +73,7 @@ func (k *Key) SetTS(ts uint64) {
 }
 
 // SetFromSlice copies key bytes and timestamp from another Key.
-func (k *Key) SetFromSlice(other Key) {
+func (k *Key) SetFromSlice(other *Key) {
 	k.Key = k.Key[:0]
 	k.Key = append(k.Key, other.Key...)
 	k.TS = other.TS

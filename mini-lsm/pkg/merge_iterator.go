@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"bytes"
 	"container/heap"
 	"fmt"
 )
@@ -10,10 +9,10 @@ import (
 type MergeIterator struct {
 	iters        []StorageIterator // List of iterators, iters[0] is the newest MemTable
 	minHeap      iteratorHeap      // Min-heap to keep track of the smallest current keys among iterators
-	currentKey   []byte            // Current key that the iterator points to
+	currentKey   *Key              // Current key that the iterator points to
 	currentValue []byte            // Current value that the iterator points to
 	valid        bool              // Whether the iterator currently points to a valid key-value pair
-	lastKey      []byte
+	lastKey      *Key
 }
 
 // heapItem represents an item in the min-heap
@@ -35,7 +34,7 @@ func (h iteratorHeap) Len() int {
 func (h iteratorHeap) Less(i, j int) bool {
 	keyI := h[i].iter.Key()
 	keyJ := h[j].iter.Key()
-	cmp := bytes.Compare(keyI, keyJ)
+	cmp := keyI.Compare(keyJ)
 	if cmp == 0 {
 		// Same key, prioritize the iterator with smaller index (newer)
 		return h[i].index < h[j].index
@@ -89,17 +88,8 @@ func (mi *MergeIterator) advance() {
 		key := it.Key()
 		val := it.Value()
 
-		//// Skip entries that are logically deleted (empty value)
-		//if val == nil || len(val) == 0 {
-		//	err := it.Next()
-		//	if err == nil && it.Valid() {
-		//		heap.Push(&mi.minHeap, heapItem{iter: it, index: item.index})
-		//	}
-		//	continue
-		//}
-
 		// Skip duplicate keys to only return the newest version
-		if mi.lastKey != nil && bytes.Equal(key, mi.lastKey) {
+		if mi.lastKey != nil && key.Compare(mi.lastKey) == 0 {
 			err := it.Next()
 			if err == nil && it.Valid() {
 				heap.Push(&mi.minHeap, heapItem{iter: it, index: item.index})
@@ -111,7 +101,7 @@ func (mi *MergeIterator) advance() {
 		mi.currentKey = key
 		mi.currentValue = val
 		mi.valid = true
-		mi.lastKey = append([]byte(nil), key...)
+		mi.lastKey = key.Clone()
 
 		// Advance the iterator for the current item to prepare for next call
 		err := it.Next()
@@ -129,7 +119,7 @@ func (mi *MergeIterator) Valid() bool {
 }
 
 // Key returns the current key that the iterator points to
-func (mi *MergeIterator) Key() []byte {
+func (mi *MergeIterator) Key() *Key {
 	if !mi.valid {
 		return nil
 	}

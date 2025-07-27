@@ -27,19 +27,24 @@ func NewWal(path string) (*Wal, error) {
 }
 
 // Put appends a key-value pair to the Wal
-func (w *Wal) Put(key, value []byte) error {
+func (w *Wal) Put(key *Key, value []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	var buf bytes.Buffer
 
 	// write key length(2 bytes)
-	if err := binary.Write(&buf, binary.BigEndian, uint16(len(key))); err != nil {
+	if err := binary.Write(&buf, binary.BigEndian, uint16(key.KeyLen())); err != nil {
 		return err
 	}
 
 	// write key
-	if _, err := buf.Write(key); err != nil {
+	if _, err := buf.Write(key.Key); err != nil {
+		return err
+	}
+
+	// write timestamp
+	if err := binary.Write(&buf, binary.BigEndian, key.TS); err != nil {
 		return err
 	}
 
@@ -74,10 +79,18 @@ func RecoverSkipList(path string, list *skiplist.SkipList) (*Wal, uint, error) {
 		if err = binary.Read(buf, binary.BigEndian, &keyLen); err != nil {
 			return nil, 0, err
 		}
+
 		key := make([]byte, keyLen)
 		if _, err = io.ReadFull(buf, key); err != nil {
 			return nil, 0, err
 		}
+
+		// ts
+		var ts uint64
+		if err = binary.Read(buf, binary.BigEndian, &ts); err != nil {
+			return nil, 0, err
+		}
+
 		var valLen uint16
 		if err = binary.Read(buf, binary.BigEndian, &valLen); err != nil {
 			return nil, 0, err
@@ -87,8 +100,16 @@ func RecoverSkipList(path string, list *skiplist.SkipList) (*Wal, uint, error) {
 		if _, err = io.ReadFull(buf, value); err != nil {
 			return nil, 0, err
 		}
-		list.Set(key, value)
-		approximateSize += uint(4 + len(key) + len(value))
+
+		fullKey := Key{
+			Key: key,
+			TS:  ts,
+		}
+
+		// fmt.Println(fullKey)
+
+		list.Set(fullKey.Encode(), value)
+		approximateSize += uint(4 + len(key) + len(value) + 8)
 	}
 
 	return &Wal{file: file}, approximateSize, nil
