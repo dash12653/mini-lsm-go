@@ -14,7 +14,9 @@ This project is a lightweight, educational key-value store based on **LSM-Tree (
 
 ## 📝 TODO
 
-- [ ] Improve Testing  
+- [ ] Improve Testing
+- [ ] Support Transactional Rollback
+- [ ] Support Snapshot Isolation
 
 ## Reference
 
