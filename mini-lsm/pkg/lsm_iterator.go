@@ -20,6 +20,7 @@ func NewLsmIterator(inner *TwoMergeIterator, endBound *Key, readTs uint64) *LsmI
 		prevKey:  nil,
 		isValid:  inner.Valid(),
 	}
+	iter.moveToNextValid()
 	return iter
 }
 
@@ -60,7 +61,7 @@ func (it *LsmIterator) moveToNextValid() {
 		}
 
 		// 合法 key
-		it.prevKey = append([]byte(nil), userKey...)
+		it.prevKey = CloneBytes(userKey)
 		it.isValid = true
 		return
 	}

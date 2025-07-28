@@ -135,7 +135,11 @@ func (mt *MemTable) Len() uint {
 
 func (mt *MemTable) Flush(builder *SsTableBuilder) {
 	for node := mt.Map.Front(); node != nil; node = node.Next() {
-		builder.add(node.Key().(*Key), node.Value.([]byte))
+		fullKey, err := DecodeKey(node.Key().([]byte))
+		if err != nil {
+			panic(err)
+		}
+		builder.add(&fullKey, node.Value.([]byte))
 	}
 	if builder.firstKey != nil {
 		builder.finishBlock()

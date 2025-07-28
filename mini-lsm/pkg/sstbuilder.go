@@ -12,6 +12,7 @@ type SsTableBuilder struct {
 	meta       []BlockMeta
 	block_size uint
 	keyHashes  []uint32
+	mxTS       uint64
 }
 
 func NewSsTableBuilder(block_size uint) *SsTableBuilder {
@@ -23,6 +24,7 @@ func NewSsTableBuilder(block_size uint) *SsTableBuilder {
 		meta:       make([]BlockMeta, 0),
 		builder:    NewBlockBuilder(block_size),
 		keyHashes:  make([]uint32, 0),
+		mxTS:       0,
 	}
 }
 
@@ -41,10 +43,11 @@ func (s *SsTableBuilder) add(key *Key, value []byte) {
 		// check if first_key is empty
 		if s.firstKey == nil {
 			s.firstKey = key
+			s.mxTS = key.TS
 		}
 		// if return true, update s.last_key
 		s.lastKey = key
-		s.keyHashes = append(s.keyHashes, Hash(key.Encode()))
+		s.keyHashes = append(s.keyHashes, Hash(key.Key))
 		return
 	}
 
@@ -56,7 +59,10 @@ func (s *SsTableBuilder) add(key *Key, value []byte) {
 	}
 	s.firstKey = key
 	s.lastKey = key
-	s.keyHashes = append(s.keyHashes, Hash(key.Encode()))
+	if key.TS > s.mxTS {
+		s.mxTS = key.TS
+	}
+	s.keyHashes = append(s.keyHashes, Hash(key.Key))
 }
 
 func (s *SsTableBuilder) finishBlock() {
@@ -96,6 +102,11 @@ func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 	binary.BigEndian.PutUint64(metaOffsetBytes, metaOffset)
 	buf = append(buf, metaOffsetBytes...)
 
+	// Step 3: Append max timestamp
+	mxTS := make([]byte, 8)
+	binary.BigEndian.PutUint64(mxTS, s.mxTS)
+	buf = append(buf, mxTS...)
+
 	// Step 3: Append bloom raw data
 	bloom := BuildFromKeyHashes(s.keyHashes, BloomBitsPerKey(len(s.keyHashes), 0.01))
 	bloomOffset := len(buf)
@@ -121,6 +132,7 @@ func (s *SsTableBuilder) build(id uint, path string) *SsTable {
 		FirstKey:        firstKey,
 		LastKey:         lastKey,
 		BloomFilter:     bloom,
+		mxTS:            s.mxTS,
 	}
 }
 

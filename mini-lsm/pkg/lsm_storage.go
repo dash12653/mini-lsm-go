@@ -86,9 +86,9 @@ func (lsi *LsmStorageInner) WriteBatchInner(batch []WriteBatchRecord) (uint64, e
 	for _, record := range batch {
 		switch r := record.(type) {
 		case *PutRecord:
-			lsi.LsmStorageState.memtable.Put(NewKeyWithTS(r.key, ts), r.value)
+			lsi.Put(NewKeyWithTS(r.key, ts), r.value)
 		case *DelRecord:
-			lsi.LsmStorageState.memtable.Put(NewKeyWithTS(r.key, ts), make([]byte, 0))
+			lsi.Put(NewKeyWithTS(r.key, ts), make([]byte, 0))
 		default:
 			return 0, fmt.Errorf("unknown record")
 		}
@@ -277,6 +277,7 @@ func Open() *MiniLsm {
 
 	// lsm.Dump()
 	mx := uint(0)
+	mxTS := uint64(0)
 	// LoadSSTableFromFile
 	for _, ID := range inner.LsmStorageState.l0_sstables {
 		fullTable, e := LoadSSTableFromFile(ID, lsm.inner.path_of_sst(ID))
@@ -285,6 +286,7 @@ func Open() *MiniLsm {
 		}
 		inner.LsmStorageState.sstables[ID] = fullTable
 		mx = max(mx, fullTable.ID)
+		mxTS = max(mxTS, fullTable.mxTS)
 	}
 
 	for _, level := range lsm.inner.LsmStorageState.levels {
@@ -295,12 +297,21 @@ func Open() *MiniLsm {
 			}
 			inner.LsmStorageState.sstables[ID] = fullTable
 			mx = max(mx, ID)
+			mxTS = max(mxTS, fullTable.mxTS)
 		}
 	}
 
 	// recover immMemTable
 	for i, immTable := range inner.LsmStorageState.imm_memtables {
 		inner.LsmStorageState.imm_memtables[i] = immTable.RecoverFromWal(immTable.id, inner.path)
+		iter := NewBoundedMemTableIterator(inner.LsmStorageState.imm_memtables[i], nil, nil)
+		for iter.Valid() {
+			mxTS = max(iter.Key().TS, mxTS)
+			err := iter.Next()
+			if err != nil {
+				return nil
+			}
+		}
 	}
 
 	// recover current memTable
@@ -321,6 +332,17 @@ func Open() *MiniLsm {
 
 		lsm.inner.nextSSTId.Add(uint64(mx + 1))
 	}
+
+	iter := NewBoundedMemTableIterator(inner.LsmStorageState.memtable, nil, nil)
+	for iter.Valid() {
+		mxTS = max(iter.Key().TS, mxTS)
+		err := iter.Next()
+		if err != nil {
+			return nil
+		}
+	}
+
+	inner.mvcc.UpdateCommitTS(mxTS)
 
 	lsm.SpawnFlushThread()
 	lsm.SpawnCompactionThread()
@@ -387,7 +409,7 @@ func (st *LsmStorageState) Clone() *LsmStorageState {
 		}
 	}
 
-	var SsTables map[uint]*SsTable
+	SsTables := make(map[uint]*SsTable)
 	for k, v := range st.sstables {
 		SsTables[k] = v
 	}
@@ -1037,7 +1059,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 
 		builder.add(twoMergeIter.Key(), twoMergeIter.Value())
 		if builder.estimated_size() >= uint32(lsi.Options.target_sst_size) {
-			if len(builder.firstKey.Key) > 0 {
+			if builder.firstKey != nil {
 				builder.finishBlock()
 			}
 
@@ -1049,7 +1071,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 		twoMergeIter.Next()
 	}
 
-	if len(builder.firstKey.Key) > 0 {
+	if builder.firstKey != nil {
 		builder.finishBlock()
 		newID := lsi.NextSSTId()
 		newSSt := builder.build(newID, lsi.path_of_sst(newID))
@@ -1222,13 +1244,13 @@ func DoJson(lsm *MiniLsm) {
 }
 
 func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
-	// 1. 打开文件
+	// 1. open file
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sst file: %w", err)
 	}
 
-	// 2. 获取文件大小
+	// 2. get the size of this file
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat sst file: %w", err)
@@ -1238,22 +1260,29 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 		return nil, fmt.Errorf("sst file too small")
 	}
 
-	// 3. 读取最后 4 字节：BloomOffset
+	// 3. read last 4 bytes：BloomOffset
 	bloomOffsetBytes := make([]byte, 4)
 	if _, err := file.ReadAt(bloomOffsetBytes, size-4); err != nil {
 		return nil, fmt.Errorf("failed to read bloom offset: %w", err)
 	}
 	bloomOffset := binary.BigEndian.Uint32(bloomOffsetBytes)
 
-	// 4. 读取 metaOffset（位于 bloomOffset - 8）
+	// 4. Read mxTS (8 bytes before bloomOffset)
+	mxTSBytes := make([]byte, 8)
+	if _, err := file.ReadAt(mxTSBytes, int64(bloomOffset)-8); err != nil {
+		return nil, fmt.Errorf("failed to read mxTS: %w", err)
+	}
+	mxTS := binary.BigEndian.Uint64(mxTSBytes)
+
+	// 5. Read metaOffset (8 bytes before mxTS)
 	metaOffsetBytes := make([]byte, 8)
-	if _, err := file.ReadAt(metaOffsetBytes, int64(bloomOffset)-8); err != nil {
+	if _, err := file.ReadAt(metaOffsetBytes, int64(bloomOffset)-16); err != nil {
 		return nil, fmt.Errorf("failed to read meta offset: %w", err)
 	}
 	metaOffset := binary.BigEndian.Uint64(metaOffsetBytes)
 
-	// 5. 读取 BlockMeta
-	metaLen := int64(bloomOffset) - 8 - int64(metaOffset)
+	// 6. Decode BlockMeta
+	metaLen := int64(bloomOffset) - 16 - int64(metaOffset)
 	metaBytes := make([]byte, metaLen)
 	if _, err := file.ReadAt(metaBytes, int64(metaOffset)); err != nil {
 		return nil, fmt.Errorf("failed to read block meta: %w", err)
@@ -1266,7 +1295,7 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 		return nil, fmt.Errorf("no block meta found")
 	}
 
-	// 6. 读取 Bloom raw data（从 bloomOffset 开始，一直到 size - 4）
+	// 7. Read Bloom raw data（from bloomOffset to size - 4）
 	bloomLen := size - 4 - int64(bloomOffset)
 	bloomBytes := make([]byte, bloomLen)
 	if _, err := file.ReadAt(bloomBytes, int64(bloomOffset)); err != nil {
@@ -1274,7 +1303,7 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 	}
 	bloom := DecodeBloom(bloomBytes)
 
-	// 7. 构造 SsTable
+	// 8. get SsTable
 	fileObj := &FileObject{File: file, Size: size}
 	firstKey := blockMeta[0].FirstKey
 	lastKey := blockMeta[len(blockMeta)-1].LastKey
@@ -1287,5 +1316,6 @@ func LoadSSTableFromFile(id uint, path string) (*SsTable, error) {
 		BloomFilter:     bloom,
 		FirstKey:        firstKey,
 		LastKey:         lastKey,
+		mxTS:            mxTS,
 	}, nil
 }

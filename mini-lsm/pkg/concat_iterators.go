@@ -24,7 +24,7 @@ func checkSstValid(ssts []*SsTable) error {
 	}
 
 	for i := 0; i < len(ssts)-1; i++ {
-		if ssts[i].LastKey.Compare(ssts[i].FirstKey) >= 0 {
+		if ssts[i].LastKey.Compare(ssts[i+1].FirstKey) >= 0 {
 			return fmt.Errorf("sstables overlap")
 		}
 	}

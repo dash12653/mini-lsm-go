@@ -50,6 +50,9 @@ type SsTable struct {
 
 	// Bloom Filter
 	BloomFilter *Bloom
+
+	// max timestamp in this sst
+	mxTS uint64
 }
 
 // NewFileObject writes data with specified dir and return corresponding FileObject

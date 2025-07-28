@@ -26,7 +26,6 @@ type Transaction struct {
 }
 
 func (txn *Transaction) get(key []byte) []byte {
-	// todo: find key in local storage
 	localIter := NewTxnLocalIterator(txn.LocalStorage, NewKeyWithTS(key, TS_RANGE_BEGIN), NewKeyWithTS(key, TS_RANGE_END))
 
 	if localIter.iter.Valid() && bytes.Compare(localIter.iter.Key().Key, key) == 0 {
@@ -36,7 +35,6 @@ func (txn *Transaction) get(key []byte) []byte {
 	txn.inner.state.RLock()
 	snapshot := txn.inner.LsmStorageState.Clone()
 	txn.inner.state.RUnlock()
-
 	keyWithTs := NewKeyWithTS(CloneBytes(key), txn.ReadTS)
 
 	var allMemTableIters []StorageIterator
@@ -47,8 +45,7 @@ func (txn *Transaction) get(key []byte) []byte {
 	}
 
 	a := NewMergeIteratorFromBoundIterators(allMemTableIters)
-
-	keyHash := Hash(keyWithTs.Key)
+	keyHash := Hash(key)
 	// step 3. try to find key in level 0 sst
 	var l0SsTIters []StorageIterator
 	for i := len(snapshot.l0_sstables) - 1; i >= 0; i-- {
@@ -65,11 +62,11 @@ func (txn *Transaction) get(key []byte) []byte {
 	}
 
 	b := NewMergeIteratorFromBoundIterators(l0SsTIters)
-
 	c := NewTwoMergeIterator(a, b)
 
 	var l12MaxIters []StorageIterator
 	// step 4. try to find this key in level 1 - maxLevel
+outer:
 	for _, level := range snapshot.levels {
 		SsTableIDs := level.SSTables
 		left, right := 0, len(SsTableIDs)-1
@@ -77,7 +74,6 @@ func (txn *Transaction) get(key []byte) []byte {
 		for left <= right {
 			mid := (left + right) / 2
 			sst := snapshot.sstables[SsTableIDs[mid]]
-
 			switch {
 			case keyWithTs.Compare(sst.FirstKey) < 0:
 				right = mid - 1
@@ -85,27 +81,26 @@ func (txn *Transaction) get(key []byte) []byte {
 				left = mid + 1
 			default:
 				if !sst.BloomFilter.MayContain(keyHash) {
-					break
+					break outer
 				}
 
 				iter := CreateAndSeekToKey(sst, keyWithTs)
 				if iter != nil && iter.Valid() && bytes.Equal(iter.Key().Key, key) {
 					l12MaxIters = append(l12MaxIters, iter)
 				}
-				break
+				break outer
 			}
 		}
 	}
-	d := NewMergeIteratorFromBoundIterators(l12MaxIters)
 
+	d := NewMergeIteratorFromBoundIterators(l12MaxIters)
 	e := NewTwoMergeIterator(c, d)
 
-	lsmIter := NewLsmIterator(e, keyWithTs, txn.ReadTS)
+	lsmIter := NewLsmIterator(e, NewKeyWithTS(key, TS_RANGE_END), txn.ReadTS)
 	if lsmIter.Valid() && bytes.Equal(lsmIter.Key().Key, key) {
 		txn.KeyHashes.ReadSetAdd(Hash(key))
 		return lsmIter.Value()
 	}
-
 	return nil
 }
 
