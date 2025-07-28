@@ -7,14 +7,14 @@ This project is a lightweight, educational key-value store based on **LSM-Tree (
 - [x] Memtable and ImmMemtable Switching
 - [x] Flush and Compaction Logic
 - [x] WAL Lifecycle Management (delete after flush)
-- [x] Bloom Filter 
+- [x] Bloom Filter
+- [x] Implement MVCC Support  
 
 ---
 
 ## 📝 TODO
 
 - [ ] Improve Testing  
-- [ ] Implement MVCC Support  
 
 ## Reference
 
