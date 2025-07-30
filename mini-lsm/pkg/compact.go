@@ -24,10 +24,12 @@ func (c ForceFullCompaction) compactionType() string {
 }
 
 func (lsi *LsmStorageInner) triggerFlush() error {
-	lsi.state.Lock()
-	defer lsi.state.Unlock()
-	if uint(len(lsi.LsmStorageState.imm_memtables)+1) >= lsi.Options.num_memtable_limit {
-		lsi.force_flush_next_memtable()
+	if uint(len(lsi.LsmStorageState.immMemTables)+1) >= lsi.Options.num_memtable_limit {
+		lsi.state.Lock()
+		defer lsi.state.Unlock()
+		if uint(len(lsi.LsmStorageState.immMemTables)+1) >= lsi.Options.num_memtable_limit {
+			lsi.forceFlushNextMemtable()
+		}
 	}
 	return nil
 }

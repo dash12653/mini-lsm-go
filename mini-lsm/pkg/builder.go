@@ -61,13 +61,13 @@ func (b *BlockBuilder) isEmpty() bool {
 }
 
 // Add Adds a key-value pair to the block. Returns false when the block is full.
-func (b *BlockBuilder) Add(key *Key, value []byte) bool {
+func (b *BlockBuilder) Add(key *Key, value []byte, force bool) bool {
 	if key.KeyLen() == 0 {
 		panic("key must not be empty")
 	}
 
 	entrySize := SizeofU16*3 + uint(key.RawLen()) + uint(len(value)) // key_len, key, val_len, val, timestamp, offset
-	if b.EstimatedSize()+entrySize > b.BlockSize && !b.isEmpty() {
+	if b.EstimatedSize()+entrySize > b.BlockSize && !b.isEmpty() && !force {
 		return false
 	}
 

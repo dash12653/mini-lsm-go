@@ -49,28 +49,6 @@ func (d *DelRecord) RecordType() string {
 	return "DelRecord"
 }
 
-//func (lsm *MiniLsm) WriteBatch(batch []WriteBatchRecord) uint64 {
-//	ts, err := lsm.inner.WriteBatchInner(batch)
-//	if err != nil {
-//		panic(err)
-//	}
-//	return ts
-//}
-
-//func (lsi *LsmStorageInner) WriteBatch(batch []WriteBatchRecord, ts uint64) bool {
-//	for _, record := range batch {
-//		switch r := record.(type) {
-//		case *PutRecord:
-//			lsi.LsmStorageState.memtable.Put(NewKeyWithTS(r.key, ts), r.value)
-//		case *DelRecord:
-//			lsi.LsmStorageState.memtable.Put(NewKeyWithTS(r.key, ts), make([]byte, 0))
-//		default:
-//			panic("unknown record")
-//		}
-//	}
-//	return true
-//}
-
 func (lsm *MiniLsm) WriteBatch(keys, values [][]byte) {
 	txn := lsm.inner.mvcc.NewTxn(lsm.inner, true)
 	for i, v := range keys {
@@ -123,23 +101,18 @@ func (lsm *MiniLsm) Put(key, value []byte) {
 func (lsm *MiniLsm) Scan(lower, upper []byte) StorageIterator {
 	txn := lsm.inner.mvcc.NewTxn(lsm.inner, true)
 	iter := txn.Scan(lower, upper)
-	txn.Commit()
+	err := txn.Commit()
+	if err != nil {
+		return nil
+	}
 	return iter
 }
-
-//func (lsm *MiniLsm) Delete(key []byte) {
-////	lsm.inner.Delete(key)
-////}
-
-//func (lsm *MiniLsm) Scan(lower, upper []byte) StorageIterator {
-////	return lsm.inner.Scan(lower, upper)
-////}
 
 func (lsm *MiniLsm) Force_flush() {
 	lsm.inner.state.Lock()
 	defer lsm.inner.state.Unlock()
-	lsm.inner.force_freeze_memtable()
-	lsm.inner.force_flush_next_memtable()
+	lsm.inner.forceFreezeMemtable()
+	lsm.inner.forceFlushNextMemtable()
 	return
 }
 
@@ -147,18 +120,18 @@ func (lsm *MiniLsm) Dump() {
 	lsm.inner.state.RLock()
 	defer lsm.inner.state.RUnlock()
 	snapshot := lsm.inner.LsmStorageState
-	memTable := snapshot.memtable
+	memTable := snapshot.memTable
 	fmt.Println("Current memTable: ", memTable, "ID: ", memTable.id, "\n")
-	length := len(snapshot.imm_memtables)
+	length := len(snapshot.immMemTables)
 	for i := length - 1; i >= 0; i-- {
-		t := snapshot.imm_memtables[i]
+		t := snapshot.immMemTables[i]
 		fmt.Println("immutable memTables: ", t, "ID: ", t.id)
 	}
 	fmt.Println("")
-	length = len(snapshot.l0_sstables)
+	length = len(snapshot.l0SSTables)
 	for i := length - 1; i >= 0; i-- {
-		t := snapshot.sstables[snapshot.l0_sstables[i]]
-		fmt.Println("Level 0 SSTs: ", t, "ID: ", t.ID)
+		t := snapshot.sSTables[snapshot.l0SSTables[i]]
+		fmt.Println("Level 0 SSTs ID: ", t.ID)
 	}
 	fmt.Println("")
 	fmt.Println("From level 1 -> maxLevel: ")
@@ -179,12 +152,12 @@ func Open() *MiniLsm {
 	inner := &LsmStorageInner{
 		state:           sync.RWMutex{},
 		LsmStorageState: NewLsmStorageState(),
-		Options:         &LsmStorageOptions{block_size: 32, target_sst_size: 256, num_memtable_limit: 3, enabelWal: true}, // Test: 64 + 256
+		Options:         &LsmStorageOptions{block_size: 8 * 1024, target_sst_size: 16 * 1024 * 1024, num_memtable_limit: 4, enabelWal: true}, //
 		compactionController: NewLeveledCompactionController(LeveledCompactionOptions{
 			levelSizeMultiplier:            2,
 			Level0FileNumCompactionTrigger: 3,
-			MaxLevels:                      10,
-			BaseLevelSizeMb:                2,
+			MaxLevels:                      6,
+			BaseLevelSizeMb:                64,
 		}),
 		path:     path,
 		manifest: NewManifest(manifestFile),
@@ -230,9 +203,9 @@ func Open() *MiniLsm {
 
 	if len(records) == 0 {
 		if inner.Options.enabelWal {
-			inner.LsmStorageState.memtable = NewMemTableWithWal(0, inner.path)
+			inner.LsmStorageState.memTable = NewMemTableWithWal(0, inner.path)
 		} else {
-			inner.LsmStorageState.memtable = NewMemTable(0)
+			inner.LsmStorageState.memTable = NewMemTable(0)
 		}
 
 		err = inner.manifest.AddRecord(&NewMemTableRecord{0})
@@ -249,16 +222,16 @@ func Open() *MiniLsm {
 		switch r := record.(type) {
 		case NewMemTableRecord:
 			// init or force freeze
-			if lsm.inner.LsmStorageState.memtable == nil {
+			if lsm.inner.LsmStorageState.memTable == nil {
 				memTable := &MemTable{id: r.ID}
-				lsm.inner.LsmStorageState.memtable = memTable
+				lsm.inner.LsmStorageState.memTable = memTable
 				continue
 			}
-			currentMemTable := lsm.inner.LsmStorageState.memtable
+			currentMemTable := lsm.inner.LsmStorageState.memTable
 			id := r.ID // new memTableID
 			memTable := &MemTable{id: id}
-			lsm.inner.LsmStorageState.imm_memtables = append(lsm.inner.LsmStorageState.imm_memtables, currentMemTable)
-			lsm.inner.LsmStorageState.memtable = memTable
+			lsm.inner.LsmStorageState.immMemTables = append(lsm.inner.LsmStorageState.immMemTables, currentMemTable)
+			lsm.inner.LsmStorageState.memTable = memTable
 		case CompactionRecord:
 			err = lsm.inner.compactionController.ApplyCompactionResult(lsm.inner, r.CompactionTask, r.SSTs, true)
 			if err != nil {
@@ -267,9 +240,9 @@ func Open() *MiniLsm {
 		case FlushRecord:
 			id := r.ID
 			t := &SsTable{ID: id}
-			lsm.inner.LsmStorageState.sstables[id] = t
-			lsm.inner.LsmStorageState.l0_sstables = append(lsm.inner.LsmStorageState.l0_sstables, id)
-			inner.LsmStorageState.imm_memtables = inner.LsmStorageState.imm_memtables[1:]
+			lsm.inner.LsmStorageState.sSTables[id] = t
+			lsm.inner.LsmStorageState.l0SSTables = append(lsm.inner.LsmStorageState.l0SSTables, id)
+			inner.LsmStorageState.immMemTables = inner.LsmStorageState.immMemTables[1:]
 		default:
 			fmt.Println("Unknown record: ", record)
 		}
@@ -279,32 +252,32 @@ func Open() *MiniLsm {
 	mx := uint(0)
 	mxTS := uint64(0)
 	// LoadSSTableFromFile
-	for _, ID := range inner.LsmStorageState.l0_sstables {
-		fullTable, e := LoadSSTableFromFile(ID, lsm.inner.path_of_sst(ID))
+	for _, ID := range inner.LsmStorageState.l0SSTables {
+		fullTable, e := LoadSSTableFromFile(ID, lsm.inner.pathOfSst(ID))
 		if e != nil {
 			panic(e)
 		}
-		inner.LsmStorageState.sstables[ID] = fullTable
+		inner.LsmStorageState.sSTables[ID] = fullTable
 		mx = max(mx, fullTable.ID)
 		mxTS = max(mxTS, fullTable.mxTS)
 	}
 
 	for _, level := range lsm.inner.LsmStorageState.levels {
 		for _, ID := range level.SSTables {
-			fullTable, e := LoadSSTableFromFile(ID, lsm.inner.path_of_sst(ID))
+			fullTable, e := LoadSSTableFromFile(ID, lsm.inner.pathOfSst(ID))
 			if e != nil {
 				panic(e)
 			}
-			inner.LsmStorageState.sstables[ID] = fullTable
+			inner.LsmStorageState.sSTables[ID] = fullTable
 			mx = max(mx, ID)
 			mxTS = max(mxTS, fullTable.mxTS)
 		}
 	}
 
 	// recover immMemTable
-	for i, immTable := range inner.LsmStorageState.imm_memtables {
-		inner.LsmStorageState.imm_memtables[i] = immTable.RecoverFromWal(immTable.id, inner.path)
-		iter := NewBoundedMemTableIterator(inner.LsmStorageState.imm_memtables[i], nil, nil)
+	for i, immTable := range inner.LsmStorageState.immMemTables {
+		inner.LsmStorageState.immMemTables[i] = immTable.RecoverFromWal(immTable.id, inner.path)
+		iter := NewBoundedMemTableIterator(inner.LsmStorageState.immMemTables[i], nil, nil)
 		for iter.Valid() {
 			mxTS = max(iter.Key().TS, mxTS)
 			err := iter.Next()
@@ -315,14 +288,14 @@ func Open() *MiniLsm {
 	}
 
 	// recover current memTable
-	if inner.LsmStorageState.memtable != nil {
-		inner.LsmStorageState.memtable = inner.LsmStorageState.memtable.RecoverFromWal(inner.LsmStorageState.memtable.id, inner.path)
+	if inner.LsmStorageState.memTable != nil {
+		inner.LsmStorageState.memTable = inner.LsmStorageState.memTable.RecoverFromWal(inner.LsmStorageState.memTable.id, inner.path)
 		lsm.inner.nextSSTId.Add(uint64(mx))
 	} else {
 		if inner.Options.enabelWal {
-			inner.LsmStorageState.memtable = NewMemTableWithWal(mx+1, inner.path)
+			inner.LsmStorageState.memTable = NewMemTableWithWal(mx+1, inner.path)
 		} else {
-			inner.LsmStorageState.memtable = NewMemTable(mx + 1)
+			inner.LsmStorageState.memTable = NewMemTable(mx + 1)
 		}
 
 		err = inner.manifest.AddRecord(&NewMemTableRecord{mx + 1})
@@ -333,7 +306,7 @@ func Open() *MiniLsm {
 		lsm.inner.nextSSTId.Add(uint64(mx + 1))
 	}
 
-	iter := NewBoundedMemTableIterator(inner.LsmStorageState.memtable, nil, nil)
+	iter := NewBoundedMemTableIterator(inner.LsmStorageState.memTable, nil, nil)
 	for iter.Valid() {
 		mxTS = max(iter.Key().TS, mxTS)
 		err := iter.Next()
@@ -350,7 +323,7 @@ func Open() *MiniLsm {
 }
 
 func (lsm *MiniLsm) Size() uint {
-	return lsm.inner.LsmStorageState.memtable.ApproximateSize
+	return lsm.inner.LsmStorageState.memTable.ApproximateSize
 }
 
 func (lsm *MiniLsm) Close() {
@@ -359,9 +332,9 @@ func (lsm *MiniLsm) Close() {
 	lsm.flushWg.Wait()
 	lsm.compactionWg.Wait()
 	if !lsm.inner.Options.enabelWal {
-		lsm.inner.force_freeze_memtable()
-		for len(lsm.inner.LsmStorageState.imm_memtables) > 0 {
-			lsm.inner.force_flush_next_memtable()
+		lsm.inner.forceFreezeMemtable()
+		for len(lsm.inner.LsmStorageState.immMemTables) > 0 {
+			lsm.inner.forceFlushNextMemtable()
 		}
 	}
 
@@ -378,27 +351,27 @@ type Level struct {
 
 type LsmStorageState struct {
 	// current MemTable we are using
-	memtable *MemTable
+	memTable *MemTable
 	// immutable MemTables
-	imm_memtables []*MemTable
-	// IDs of level 0 sstables
-	l0_sstables []uint
+	immMemTables []*MemTable
+	// IDs of level 0 sSTables
+	l0SSTables []uint
 	// the id of this lsm tree
 	id int
 	// SSTables sorted by key range; L1 - L_max for keveked compaction, or tiers for tired
 	levels []*Level
 	// SST Objects
-	sstables map[uint]*SsTable
+	sSTables map[uint]*SsTable
 }
 
 func (st *LsmStorageState) Clone() *LsmStorageState {
-	memTable := st.memtable
+	memTable := st.memTable
 
-	immMemTable := make([]*MemTable, len(st.imm_memtables))
-	copy(immMemTable, st.imm_memtables)
+	immMemTable := make([]*MemTable, len(st.immMemTables))
+	copy(immMemTable, st.immMemTables)
 
-	l0SSTables := make([]uint, len(st.l0_sstables))
-	copy(l0SSTables, st.l0_sstables)
+	l0SSTables := make([]uint, len(st.l0SSTables))
+	copy(l0SSTables, st.l0SSTables)
 
 	levels := make([]*Level, len(st.levels))
 	for i, level := range st.levels {
@@ -410,27 +383,27 @@ func (st *LsmStorageState) Clone() *LsmStorageState {
 	}
 
 	SsTables := make(map[uint]*SsTable)
-	for k, v := range st.sstables {
+	for k, v := range st.sSTables {
 		SsTables[k] = v
 	}
 
 	return &LsmStorageState{
-		memtable:      memTable,
-		imm_memtables: immMemTable,
-		l0_sstables:   l0SSTables,
-		id:            st.id,
-		levels:        levels,
-		sstables:      SsTables,
+		memTable:     memTable,
+		immMemTables: immMemTable,
+		l0SSTables:   l0SSTables,
+		id:           st.id,
+		levels:       levels,
+		sSTables:     SsTables,
 	}
 }
 
 func NewLsmStorageState() *LsmStorageState {
 	return &LsmStorageState{
-		// memtable:      NewMemTable(0),
-		imm_memtables: make([]*MemTable, 0),
-		l0_sstables:   make([]uint, 0),
-		id:            0,
-		sstables:      make(map[uint]*SsTable),
+		// memTable:      NewMemTable(0),
+		immMemTables: make([]*MemTable, 0),
+		l0SSTables:   make([]uint, 0),
+		id:           0,
+		sSTables:     make(map[uint]*SsTable),
 	}
 }
 
@@ -456,7 +429,7 @@ type LsmStorageInner struct {
 type LsmStorageOptions struct {
 	// Block size in bytes
 	block_size uint
-	// SST size in bytes, also the approximate memtable capacity limit
+	// SST size in bytes, also the approximate memTable capacity limit
 	target_sst_size uint
 	// Maximum number of memtables in memory, flush to L0 when exceeding this limit
 	num_memtable_limit uint
@@ -466,124 +439,35 @@ type LsmStorageOptions struct {
 	compactionOptions compactionOptions
 }
 
-//// Get return value based on key
-//func (lsi *LsmStorageInner) Get(key []byte) ([]byte, bool) {
-//	// to be concurrent safe, we need to add a read lock.
-//	lsi.state.RLock()
-//	// free read lock at last
-//	defer lsi.state.RUnlock()
-//
-//	// step 1. try to find key in current memtable
-//	ele, _ := lsi.LsmStorageState.memtable.Get(&Key{})
-//	if ele != nil {
-//		if len(ele) == 0 {
-//			return nil, false
-//		}
-//		return ele, true
-//	}
-//
-//	// step 2. try to find key in immutable memtables
-//	candidates := lsi.LsmStorageState.imm_memtables
-//	for i := len(candidates) - 1; i >= 0; i-- {
-//		if ele, _ = candidates[i].Get(key); ele != nil {
-//			if len(ele) == 0 {
-//				return nil, false
-//			}
-//			return ele, true
-//		}
-//	}
-//
-//	// step 3. try to find key in level 0 sst
-//	for _, v := range lsi.LsmStorageState.l0_sstables {
-//		SsT := lsi.LsmStorageState.sstables[v]
-//		if bytes.Compare(key, SsT.FirstKey) < 0 || bytes.Compare(key, SsT.LastKey) > 0 {
-//			continue
-//		}
-//
-//		if !SsT.BloomFilter.MayContain(Hash(key)) {
-//			continue
-//		}
-//
-//		iter := CreateAndSeekToKey(SsT, key)
-//		if iter.Valid() && len(iter.Value()) > 0 {
-//			return iter.Value(), true
-//		}
-//	}
-//
-//	keyHash := Hash(key)
-//
-//	// step 4. try to find this key in level 1 - maxLevel
-//	for _, level := range lsi.LsmStorageState.levels {
-//		SsTableIDs := level.SSTables
-//		left, right := 0, len(SsTableIDs)-1
-//
-//		for left <= right {
-//			mid := (left + right) / 2
-//			sst := lsi.LsmStorageState.sstables[SsTableIDs[mid]]
-//
-//			switch {
-//			case bytes.Compare(key, sst.FirstKey) < 0:
-//				right = mid - 1
-//			case bytes.Compare(key, sst.LastKey) > 0:
-//				left = mid + 1
-//			default:
-//				if !sst.BloomFilter.MayContain(keyHash) {
-//					break
-//				}
-//
-//				iter := CreateAndSeekToKey(sst, key)
-//				if iter != nil && iter.Valid() && bytes.Equal(iter.Key(), key) {
-//					if len(iter.Value()) == 0 {
-//						return nil, false // tombstone
-//					}
-//					return iter.Value(), true
-//				}
-//				break
-//			}
-//		}
-//	}
-//
-//	// didn't find key
-//	return nil, false
-//}
-
-//func (lsi *LsmStorageInner) GetWithTS(key []byte, TS uint64) ([]byte, bool) {
-//	lsi.state.RLock()
-//	snapshot := lsi.LsmStorageState.Clone()
-//	defer lsi.state.RUnlock()
-//
-//}
-
-// Put insert a key-value pair into current memtable
+// Put insert a key-value pair into current memTable
 func (lsi *LsmStorageInner) Put(key *Key, value []byte) {
-	// use write lock to avoid racing
-	lsi.state.Lock()
-	defer lsi.state.Unlock()
-	lsi.LsmStorageState.memtable.Put(key, value)
-	lsi.try_freeze()
+	lsi.LsmStorageState.memTable.Put(key, value)
+	lsi.tryFreeze()
 }
 
 // Delete replace the corresponding value with an empty byte array
 func (lsi *LsmStorageInner) Delete(key *Key) {
 	lsi.state.Lock()
 	defer lsi.state.Unlock()
-	lsi.LsmStorageState.memtable.Put(key, []byte{})
+	lsi.LsmStorageState.memTable.Put(key, []byte{})
 }
 
-// try_freeze get a new memtable if needed
-func (lsi *LsmStorageInner) try_freeze() {
-	// check size of the memtable and try freeze
-	if lsi.LsmStorageState.memtable.ApproximateSize >= lsi.Options.target_sst_size {
+// tryFreeze get a new memTable if needed
+func (lsi *LsmStorageInner) tryFreeze() {
+	// check size of the memTable and try freeze
+	if lsi.LsmStorageState.memTable.ApproximateSize >= lsi.Options.target_sst_size {
+		lsi.state.Lock()
+		defer lsi.state.Unlock()
 		// check again to avoid duplicate freeze
-		if lsi.LsmStorageState.memtable.ApproximateSize >= lsi.Options.target_sst_size {
-			lsi.force_freeze_memtable()
+		if lsi.LsmStorageState.memTable.ApproximateSize >= lsi.Options.target_sst_size {
+			lsi.forceFreezeMemtable()
 		}
 	}
 }
 
-// force_freeze_memtable
-func (lsi *LsmStorageInner) force_freeze_memtable() {
-	if lsi.LsmStorageState.memtable.Map.Len() == 0 {
+// forceFreezeMemtable
+func (lsi *LsmStorageInner) forceFreezeMemtable() {
+	if lsi.LsmStorageState.memTable.Map.Len() == 0 {
 		return
 	}
 
@@ -595,122 +479,13 @@ func (lsi *LsmStorageInner) force_freeze_memtable() {
 		newMemTable = NewMemTable(newMemTableId)
 	}
 
-	lsi.LsmStorageState.imm_memtables = append(lsi.LsmStorageState.imm_memtables, lsi.LsmStorageState.memtable)
-	lsi.LsmStorageState.memtable = newMemTable
+	lsi.LsmStorageState.immMemTables = append(lsi.LsmStorageState.immMemTables, lsi.LsmStorageState.memTable)
+	lsi.LsmStorageState.memTable = newMemTable
 	err := lsi.manifest.AddRecord(&NewMemTableRecord{newMemTableId})
 	if err != nil {
 		panic(err)
 	}
 }
-
-//func (lsi *LsmStorageInner) Scan(lower []byte, upper []byte) StorageIterator {
-//	lsi.state.RLock()
-//	defer lsi.state.RUnlock()
-//	snapshot := lsi.LsmStorageState
-//
-//	immMemtables := make([]*MemTable, len(snapshot.imm_memtables))
-//	copy(immMemtables, snapshot.imm_memtables)
-//	memtable := snapshot.memtable
-//
-//	memtableIters := make([]StorageIterator, 0, len(immMemtables)+1)
-//
-//	memtableIters = append(memtableIters, memtable.Scan(lower, upper))
-//	for i := len(snapshot.imm_memtables) - 1; i >= 0; i-- {
-//		memtableIters = append(memtableIters, snapshot.imm_memtables[i].Scan(lower, upper))
-//	}
-//	memtableMergeIters := NewMergeIteratorFromBoundIterators(memtableIters)
-//
-//	// create sst iterators
-//	SSTIters := make([]StorageIterator, 0)
-//	// newest first
-//	for i := len(lsi.LsmStorageState.l0_sstables) - 1; i >= 0; i-- {
-//		sst_id := lsi.LsmStorageState.l0_sstables[i]
-//		sstable := lsi.LsmStorageState.sstables[sst_id]
-//		iter := CreateAndSeekToKey(sstable, lower)
-//		SSTIters = append(SSTIters, iter)
-//	}
-//
-//	SSTMergeIters := NewMergeIteratorFromBoundIterators(SSTIters)
-//	a := NewTwoMergeIterator(memtableMergeIters, SSTMergeIters)
-//
-//	var lowerLevelsIter []StorageIterator
-//	for _, level := range snapshot.levels {
-//		SstIDs := level.SSTables
-//		levelTables := make([]*SsTable, 0)
-//		for _, tableID := range SstIDs {
-//			Sst := snapshot.sstables[tableID]
-//			if rangeOverlap(lower, upper, Sst.FirstKey, Sst.LastKey) {
-//				levelTables = append(levelTables, Sst)
-//			}
-//		}
-//		levelTablesIter, err := NewSstConcatIteratorSeekToKey(levelTables, lower)
-//		if err != nil {
-//			panic(err)
-//		}
-//		lowerLevelsIter = append(lowerLevelsIter, levelTablesIter)
-//	}
-//
-//	b := NewMergeIteratorFromBoundIterators(lowerLevelsIter)
-//	c := NewTwoMergeIterator(a, b)
-//
-//	return NewFusedIterator(c, upper)
-//}
-//
-//func (lsi *LsmStorageInner) ScanWithTS(lower []byte, upper []byte) StorageIterator {
-//	txn := lsi.mvcc.NewTxn(lsi, true)
-//	txn.scan()
-//
-//	lsi.state.RLock()
-//	defer lsi.state.RUnlock()
-//	snapshot := lsi.LsmStorageState
-//
-//	immMemtables := make([]*MemTable, len(snapshot.imm_memtables))
-//	copy(immMemtables, snapshot.imm_memtables)
-//	memtable := snapshot.memtable
-//
-//	memtableIters := make([]StorageIterator, 0, len(immMemtables)+1)
-//
-//	memtableIters = append(memtableIters, memtable.Scan(lower, upper))
-//	for i := len(snapshot.imm_memtables) - 1; i >= 0; i-- {
-//		memtableIters = append(memtableIters, snapshot.imm_memtables[i].Scan(lower, upper))
-//	}
-//	memtableMergeIters := NewMergeIteratorFromBoundIterators(memtableIters)
-//
-//	// create sst iterators
-//	SSTIters := make([]StorageIterator, 0)
-//	// newest first
-//	for i := len(lsi.LsmStorageState.l0_sstables) - 1; i >= 0; i-- {
-//		sst_id := lsi.LsmStorageState.l0_sstables[i]
-//		sstable := lsi.LsmStorageState.sstables[sst_id]
-//		iter := CreateAndSeekToKey(sstable, lower)
-//		SSTIters = append(SSTIters, iter)
-//	}
-//
-//	SSTMergeIters := NewMergeIteratorFromBoundIterators(SSTIters)
-//	a := NewTwoMergeIterator(memtableMergeIters, SSTMergeIters)
-//
-//	var lowerLevelsIter []StorageIterator
-//	for _, level := range snapshot.levels {
-//		SstIDs := level.SSTables
-//		levelTables := make([]*SsTable, 0)
-//		for _, tableID := range SstIDs {
-//			Sst := snapshot.sstables[tableID]
-//			if rangeOverlap(lower, upper, Sst.FirstKey, Sst.LastKey) {
-//				levelTables = append(levelTables, Sst)
-//			}
-//		}
-//		levelTablesIter, err := NewSstConcatIteratorSeekToKey(levelTables, lower)
-//		if err != nil {
-//			panic(err)
-//		}
-//		lowerLevelsIter = append(lowerLevelsIter, levelTablesIter)
-//	}
-//
-//	b := NewMergeIteratorFromBoundIterators(lowerLevelsIter)
-//	c := NewTwoMergeIterator(a, b)
-//
-//	return NewFusedIterator(c, upper)
-//}
 
 func rangeOverlap(userBegin, userEnd, tableBegin, tableEnd []byte) bool {
 	if bytes.Compare(tableEnd, userBegin) < 0 || bytes.Compare(tableBegin, userEnd) > 0 {
@@ -719,26 +494,26 @@ func rangeOverlap(userBegin, userEnd, tableBegin, tableEnd []byte) bool {
 	return true
 }
 
-// force_flush_next_memtable flushes the earliest-created immutable memtable to disk
-func (lsi *LsmStorageInner) force_flush_next_memtable() {
-	length := len(lsi.LsmStorageState.imm_memtables)
+// forceFlushNextMemtable flushes the earliest-created immutable memTable to disk
+func (lsi *LsmStorageInner) forceFlushNextMemtable() {
+	length := len(lsi.LsmStorageState.immMemTables)
 	if length == 0 {
 		fmt.Println("No Immutable memtables to flush")
 		return
 	}
 
 	// create a new sst builder
-	flushMemtable := lsi.LsmStorageState.imm_memtables[0]
-	builder := NewSsTableBuilder(lsi.Options.target_sst_size) //
-	// fill the builder with data in memtable we want to flush
+	flushMemtable := lsi.LsmStorageState.immMemTables[0]
+	builder := NewSsTableBuilder(lsi.Options.block_size) //
+	// fill the builder with data in memTable we want to flush
 	flushMemtable.Flush(builder)
 	// build a sst
 	sstId := flushMemtable.id
-	sst := builder.build(sstId, lsi.path_of_sst(sstId))
-	// pop out the immutable memtable we flushed
-	lsi.LsmStorageState.imm_memtables = lsi.LsmStorageState.imm_memtables[1:]
-	lsi.LsmStorageState.l0_sstables = append(lsi.LsmStorageState.l0_sstables, sstId)
-	lsi.LsmStorageState.sstables[sstId] = sst
+	sst := builder.build(sstId, lsi.pathOfSst(sstId))
+	// pop out the immutable memTable we flushed
+	lsi.LsmStorageState.immMemTables = lsi.LsmStorageState.immMemTables[1:]
+	lsi.LsmStorageState.l0SSTables = append(lsi.LsmStorageState.l0SSTables, sstId)
+	lsi.LsmStorageState.sSTables[sstId] = sst
 	err := lsi.manifest.AddRecord(&FlushRecord{sstId})
 	if err != nil {
 		panic(err)
@@ -752,23 +527,23 @@ func (lsi *LsmStorageInner) force_flush_next_memtable() {
 	}
 }
 
-// force_flush_next_memtable flushes the earliest-created immutable memtable to disk
-func (lsi *LsmStorageInner) path_of_sst_static(basePath string, id uint) string {
+// forceFlushNextMemtable flushes the earliest-created immutable memTable to disk
+func (lsi *LsmStorageInner) pathOfSstStatic(basePath string, id uint) string {
 	filename := fmt.Sprintf("%05d.sst", id)
 	return filepath.Join(basePath, filename)
 }
 
-func (lsi *LsmStorageInner) path_of_sst(id uint) string {
-	return lsi.path_of_sst_static(lsi.path, id)
+func (lsi *LsmStorageInner) pathOfSst(id uint) string {
+	return lsi.pathOfSstStatic(lsi.path, id)
 }
 
 func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullCompaction) []*SsTable {
 	// Build L0 SSTable iterators
 	l0SSTables := forceCompaction.l0SSTables
 	l0SSTablesIters := make([]StorageIterator, 0)
-	length := len(lsi.LsmStorageState.l0_sstables)
+	length := len(lsi.LsmStorageState.l0SSTables)
 	for i := length - 1; i >= 0; i-- {
-		iter := CreateAndSeekToFirst(lsi.LsmStorageState.sstables[l0SSTables[i]])
+		iter := CreateAndSeekToFirst(lsi.LsmStorageState.sSTables[l0SSTables[i]])
 		l0SSTablesIters = append(l0SSTablesIters, iter)
 	}
 	a := NewMergeIteratorFromBoundIterators(l0SSTablesIters)
@@ -780,7 +555,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 		l1SSTablesArr := make([]*SsTable, 0)
 		length = len(l1SSTables)
 		for i := 0; i < length; i++ {
-			l1SSTablesArr = append(l1SSTablesArr, lsi.LsmStorageState.sstables[l1SSTables[i]])
+			l1SSTablesArr = append(l1SSTablesArr, lsi.LsmStorageState.sSTables[l1SSTables[i]])
 		}
 		b, err := NewSstConcatIterSeekToFirst(l1SSTablesArr)
 		if err != nil {
@@ -795,7 +570,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 	newSSts := make([]*SsTable, 0)
 
 	// compact
-	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	builder := NewSsTableBuilder(lsi.Options.block_size)
 	i := 1
 	for twoMergeIter.Valid() {
 		i++
@@ -803,9 +578,9 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 		if builder.estimated_size() >= uint32(lsi.Options.target_sst_size) {
 			builder.finishBlock()
 			newID := lsi.NextSSTId()
-			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSt := builder.build(newID, lsi.pathOfSst(newID))
 			newSSts = append(newSSts, newSSt)
-			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+			builder = NewSsTableBuilder(lsi.Options.block_size)
 		}
 		twoMergeIter.Next()
 	}
@@ -813,15 +588,15 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 	if len(builder.firstKey.Key) > 0 {
 		builder.finishBlock()
 		newID := lsi.NextSSTId()
-		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSt := builder.build(newID, lsi.pathOfSst(newID))
 		newSSts = append(newSSts, newSSt)
 	}
 
 	// maintain lsm tree meta
 	// step 1. delete l0 sst files and delete meta data
 	for _, v := range forceCompaction.l0SSTables {
-		tbl := lsi.LsmStorageState.sstables[v]
-		fileName := lsi.path_of_sst(tbl.ID)
+		tbl := lsi.LsmStorageState.sSTables[v]
+		fileName := lsi.pathOfSst(tbl.ID)
 		// delete file
 		err := os.Remove(fileName)
 		if err != nil {
@@ -830,16 +605,16 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 			fmt.Println("sst file deleted:", fileName)
 		}
 		// delete metadata in LsmStorageState
-		delete(lsi.LsmStorageState.sstables, v)
+		delete(lsi.LsmStorageState.sSTables, v)
 	}
 	// delete metadata in LsmStorageState
-	lsi.LsmStorageState.l0_sstables = lsi.LsmStorageState.l0_sstables[len(forceCompaction.l0SSTables):]
+	lsi.LsmStorageState.l0SSTables = lsi.LsmStorageState.l0SSTables[len(forceCompaction.l0SSTables):]
 
 	// step 2. delete l1 sst files and delete meta data
 	for _, v := range forceCompaction.l1SSTables {
 
-		tbl := lsi.LsmStorageState.sstables[v]
-		fileName := lsi.path_of_sst(tbl.ID)
+		tbl := lsi.LsmStorageState.sSTables[v]
+		fileName := lsi.pathOfSst(tbl.ID)
 		// delete file
 		err := os.Remove(fileName)
 		if err != nil {
@@ -848,7 +623,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 			fmt.Println("sst file deleted:", fileName)
 		}
 		// delete metadata in LsmStorageState
-		delete(lsi.LsmStorageState.sstables, v)
+		delete(lsi.LsmStorageState.sSTables, v)
 
 	}
 
@@ -857,7 +632,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 	lsi.LsmStorageState.levels[0].LevelNum = 0
 	// add this new sst file to level 1
 	for _, v := range newSSts {
-		lsi.LsmStorageState.sstables[v.ID] = v
+		lsi.LsmStorageState.sSTables[v.ID] = v
 		lsi.LsmStorageState.levels[0].LevelNum++
 		lsi.LsmStorageState.levels[0].SSTables = append(lsi.LsmStorageState.levels[0].SSTables, v.ID)
 	}
@@ -868,7 +643,7 @@ func (lsi *LsmStorageInner) DoForceFullCompaction(forceCompaction *ForceFullComp
 func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompactionTask) []*SsTable {
 	if task.upperLevel == nil {
 		fullCompactionTask := &ForceFullCompaction{
-			l0SSTables: lsi.LsmStorageState.l0_sstables,
+			l0SSTables: lsi.LsmStorageState.l0SSTables,
 			l1SSTables: task.lowerLevelSstIds,
 		}
 		return lsi.DoForceFullCompaction(fullCompactionTask)
@@ -881,10 +656,10 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 	LowerTablesIDS := task.lowerLevelSstIds
 	LowerTables := make([]*SsTable, len(LowerTablesIDS))
 	for i, v := range UpperTableIDS {
-		UpperTables[i] = lsi.LsmStorageState.sstables[v]
+		UpperTables[i] = lsi.LsmStorageState.sSTables[v]
 	}
 	for i, v := range LowerTablesIDS {
-		LowerTables[i] = lsi.LsmStorageState.sstables[v]
+		LowerTables[i] = lsi.LsmStorageState.sSTables[v]
 	}
 	UpperTablesIters, err := NewSstConcatIterSeekToFirst(UpperTables)
 	if err != nil {
@@ -905,7 +680,7 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 	newSSts := make([]*SsTable, 0)
 
 	// compact
-	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	builder := NewSsTableBuilder(lsi.Options.block_size)
 	i := 1
 	for twoMergeIter.Valid() {
 		i++
@@ -916,9 +691,9 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 			}
 
 			newID := lsi.NextSSTId()
-			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSt := builder.build(newID, lsi.pathOfSst(newID))
 			newSSts = append(newSSts, newSSt)
-			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+			builder = NewSsTableBuilder(lsi.Options.block_size)
 		}
 		twoMergeIter.Next()
 	}
@@ -926,7 +701,7 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 	if len(builder.firstKey.Key) > 0 {
 		builder.finishBlock()
 		newID := lsi.NextSSTId()
-		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSt := builder.build(newID, lsi.pathOfSst(newID))
 		newSSts = append(newSSts, newSSt)
 	}
 
@@ -936,8 +711,8 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 	// maintain lsm tree meta
 	// step 1. delete upper sst files and delete meta data
 	for _, v := range task.upperLevelSstIds {
-		tbl := lsi.LsmStorageState.sstables[v]
-		fileName := lsi.path_of_sst(tbl.ID)
+		tbl := lsi.LsmStorageState.sSTables[v]
+		fileName := lsi.pathOfSst(tbl.ID)
 		// delete file
 		err = os.Remove(fileName)
 		if err != nil {
@@ -946,14 +721,14 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 			fmt.Println("sst file deleted:", fileName)
 		}
 		// delete metadata in LsmStorageState
-		delete(lsi.LsmStorageState.sstables, v)
+		delete(lsi.LsmStorageState.sSTables, v)
 	}
 
 	// step 2. delete lower sst files and delete meta data
 	for _, v := range task.lowerLevelSstIds {
 
-		tbl := lsi.LsmStorageState.sstables[v]
-		fileName := lsi.path_of_sst(tbl.ID)
+		tbl := lsi.LsmStorageState.sSTables[v]
+		fileName := lsi.pathOfSst(tbl.ID)
 		// delete file
 		err = os.Remove(fileName)
 		if err != nil {
@@ -962,7 +737,7 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 			fmt.Println("sst file deleted:", fileName)
 		}
 		// delete metadata in LsmStorageState
-		delete(lsi.LsmStorageState.sstables, v)
+		delete(lsi.LsmStorageState.sSTables, v)
 
 	}
 
@@ -975,7 +750,7 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 
 	// add these new sst files to lowerLevel
 	for _, v := range newSSts {
-		lsi.LsmStorageState.sstables[v.ID] = v
+		lsi.LsmStorageState.sSTables[v.ID] = v
 		lsi.LsmStorageState.levels[task.lowerLevel-1].LevelNum++
 		lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables = append(lsi.LsmStorageState.levels[task.lowerLevel-1].SSTables, v.ID)
 	}
@@ -986,13 +761,12 @@ func (lsi *LsmStorageInner) DoSimpleLeveledCompaction(task *SimpleLeveledCompact
 func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*SsTable {
 	lsi.state.RLock()
 	var a, b StorageIterator
-
 	if task.UpperLevel == nil {
 		l0SsTables := task.UpperLevelSstIds
 		l0SSTablesIters := make([]StorageIterator, 0)
 		length := len(l0SsTables)
 		for i := length - 1; i >= 0; i-- {
-			iter := CreateAndSeekToFirst(lsi.LsmStorageState.sstables[l0SsTables[i]])
+			iter := CreateAndSeekToFirst(lsi.LsmStorageState.sSTables[l0SsTables[i]])
 			l0SSTablesIters = append(l0SSTablesIters, iter)
 		}
 		a = NewMergeIteratorFromBoundIterators(l0SSTablesIters)
@@ -1000,7 +774,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 		upperSsTablesIDs := task.UpperLevelSstIds
 		upperSsTables := make([]*SsTable, 0)
 		for _, v := range upperSsTablesIDs {
-			upperSsTables = append(upperSsTables, lsi.LsmStorageState.sstables[v])
+			upperSsTables = append(upperSsTables, lsi.LsmStorageState.sSTables[v])
 		}
 		c, err := NewSstConcatIterSeekToFirst(upperSsTables)
 		if err != nil {
@@ -1012,7 +786,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 	lowerSsTablesIDs := task.LowerLevelSstIds
 	lowerSsTables := make([]*SsTable, 0)
 	for _, v := range lowerSsTablesIDs {
-		lowerSsTables = append(lowerSsTables, lsi.LsmStorageState.sstables[v])
+		lowerSsTables = append(lowerSsTables, lsi.LsmStorageState.sSTables[v])
 	}
 	d, err := NewSstConcatIterSeekToFirst(lowerSsTables)
 	if err != nil {
@@ -1030,7 +804,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 	var seenFirstVisibleForKey bool
 
 	// compact
-	builder := NewSsTableBuilder(lsi.Options.target_sst_size)
+	builder := NewSsTableBuilder(lsi.Options.block_size)
 	for twoMergeIter.Valid() {
 		fullKey := twoMergeIter.Key()
 		userKey := fullKey.Key
@@ -1064,9 +838,9 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 			}
 
 			newID := lsi.NextSSTId()
-			newSSt := builder.build(newID, lsi.path_of_sst(newID))
+			newSSt := builder.build(newID, lsi.pathOfSst(newID))
 			newSSts = append(newSSts, newSSt)
-			builder = NewSsTableBuilder(lsi.Options.target_sst_size)
+			builder = NewSsTableBuilder(lsi.Options.block_size)
 		}
 		twoMergeIter.Next()
 	}
@@ -1074,7 +848,7 @@ func (lsi *LsmStorageInner) DoLeveledCompaction(task *LeveledCompactionTask) []*
 	if builder.firstKey != nil {
 		builder.finishBlock()
 		newID := lsi.NextSSTId()
-		newSSt := builder.build(newID, lsi.path_of_sst(newID))
+		newSSt := builder.build(newID, lsi.pathOfSst(newID))
 		newSSts = append(newSSts, newSSt)
 	}
 
@@ -1116,7 +890,7 @@ func (lsi *LsmStorageInner) NextSSTId() uint {
 func (lsi *LsmStorageInner) forceFullCompaction() {
 	lsi.state.Lock()
 	defer lsi.state.Unlock()
-	l0SSTables := lsi.LsmStorageState.l0_sstables
+	l0SSTables := lsi.LsmStorageState.l0SSTables
 	var l1SSTables []uint
 	if len(lsi.LsmStorageState.levels) != 0 {
 		l1SSTables = lsi.LsmStorageState.levels[0].SSTables

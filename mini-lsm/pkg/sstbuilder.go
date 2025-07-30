@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"bytes"
 	"encoding/binary"
 )
 
@@ -13,6 +14,7 @@ type SsTableBuilder struct {
 	block_size uint
 	keyHashes  []uint32
 	mxTS       uint64
+	pre        []byte
 }
 
 func NewSsTableBuilder(block_size uint) *SsTableBuilder {
@@ -25,6 +27,7 @@ func NewSsTableBuilder(block_size uint) *SsTableBuilder {
 		builder:    NewBlockBuilder(block_size),
 		keyHashes:  make([]uint32, 0),
 		mxTS:       0,
+		pre:        nil,
 	}
 }
 
@@ -36,10 +39,18 @@ The encoding of SST is like:
 | data block | ... | data block |            metadata           | meta block offset (u32) |
 -------------------------------------------------------------------------------------------
 */
-func (s *SsTableBuilder) add(key *Key, value []byte) {
 
+func bytesToUint64(b []byte) uint64 {
+	if len(b) < 8 {
+		return 0 // 或者报错
+	}
+	return binary.BigEndian.Uint64(b)
+}
+
+func (s *SsTableBuilder) add(key *Key, value []byte) {
+	sameKeyAsPrev := s.pre != nil && bytes.Equal(s.pre, key.Key)
 	// try to add key-value pair into current block builder
-	if s.builder.Add(key, value) {
+	if s.builder.Add(key, value, sameKeyAsPrev) {
 		// check if first_key is empty
 		if s.firstKey == nil {
 			s.firstKey = key
@@ -47,18 +58,21 @@ func (s *SsTableBuilder) add(key *Key, value []byte) {
 		}
 		// if return true, update s.last_key
 		s.lastKey = key
+		s.pre = CloneBytes(key.Key)
 		s.keyHashes = append(s.keyHashes, Hash(key.Key))
 		return
 	}
 
 	// now the current block builder is full. we need to finish building and create a new block builder.
 	s.finishBlock()
-	if !s.builder.Add(key, value) {
+	s.pre = nil
+	if !s.builder.Add(key, value, false) {
 		panic("Failed adding a kv-pair.")
 		return
 	}
 	s.firstKey = key
 	s.lastKey = key
+	s.pre = CloneBytes(key.Key)
 	if key.TS > s.mxTS {
 		s.mxTS = key.TS
 	}

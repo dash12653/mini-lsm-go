@@ -3,7 +3,7 @@ package pkg
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/huandu/skiplist"
+	"github.com/INLOpen/skiplist"
 	"io"
 	"os"
 	"sync"
@@ -61,7 +61,7 @@ func (w *Wal) Put(key *Key, value []byte) error {
 	return err
 }
 
-func RecoverSkipList(path string, list *skiplist.SkipList) (*Wal, uint, error) {
+func RecoverSkipList(path string, list *skiplist.SkipList[[]byte, []byte]) (*Wal, uint, error) {
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, 0, err
@@ -108,7 +108,7 @@ func RecoverSkipList(path string, list *skiplist.SkipList) (*Wal, uint, error) {
 
 		// fmt.Println(fullKey)
 
-		list.Set(fullKey.Encode(), value)
+		list.Insert(fullKey.Encode(), value)
 		approximateSize += uint(4 + len(key) + len(value) + 8)
 	}
 

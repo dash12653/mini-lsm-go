@@ -52,7 +52,7 @@ func main() {
 			start := time.Now()
 			for i := begin; i <= end; i++ {
 				key := uint64ToBytes(i)
-				val := []byte(fmt.Sprintf("value%d@%dvaluevaluevalue", i, epoch))
+				val := []byte(fmt.Sprintf("value%d@%dvalue", i, epoch))
 				keys = append(keys, key)
 				values = append(values, val)
 			}
@@ -152,6 +152,37 @@ func main() {
 			pkg.DoJson(lsmEngine)
 		} else if line == "close" {
 			lsmEngine.Close()
+		} else if strings.HasPrefix(line, "test ") {
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) != 3 {
+				fmt.Println("invalid command")
+				continue
+			}
+			startInt, err1 := strconv.ParseUint(parts[1], 10, 64)
+			endInt, err2 := strconv.ParseUint(parts[2], 10, 64)
+			if err1 != nil || err2 != nil {
+				fmt.Println("invalid range")
+				continue
+			}
+			start := time.Now()
+			iter := lsmEngine.Scan(
+				uint64ToBytes(startInt),
+				uint64ToBytes(endInt),
+			)
+			cnt := 0
+			for iter.Valid() {
+				if len(iter.Value()) == 0 {
+					iter.Next()
+					continue
+				}
+				cnt++
+				// k := bytesToUint64(iter.Key().Key)
+				tmp := make([]byte, len(iter.Value()))
+				copy(tmp, iter.Value())
+				iter.Next()
+			}
+			duration := time.Since(start)
+			fmt.Printf("scan cnt: %d, time: %v\n", cnt, duration)
 		} else {
 			fmt.Println("invalid command:", line)
 		}

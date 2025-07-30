@@ -30,7 +30,7 @@ func NewSimpleLeveledCompactionController(options *SimpleLeveledCompactionOption
 func (c *SimpleLeveledCompactionController) GenerateCompactionTask(snapshot *LsmStorageState) *SimpleLeveledCompactionTask {
 
 	// initialize with length of ssts in l0
-	levelSizes := []int{len(snapshot.l0_sstables)}
+	levelSizes := []int{len(snapshot.l0SSTables)}
 	for _, level := range snapshot.levels {
 		levelSizes = append(levelSizes, level.LevelNum)
 	}
@@ -46,7 +46,7 @@ func (c *SimpleLeveledCompactionController) GenerateCompactionTask(snapshot *Lsm
 			var upperLevelSstIds []uint
 			if i == 0 {
 				upperLevelPtr = nil
-				upperLevelSstIds = append([]uint{}, snapshot.l0_sstables...)
+				upperLevelSstIds = append([]uint{}, snapshot.l0SSTables...)
 			} else {
 				upper := i
 				upperLevelPtr = &upper

@@ -112,15 +112,15 @@ func TestMemTableBasic(t *testing.T) {
 	}
 }
 
-// TestMemTableAutoFreeze verifies that when memtable exceeds configured size,
-// it will be frozen and added to imm_memtables.
+// TestMemTableAutoFreeze verifies that when memTable exceeds configured size,
+// it will be frozen and added to immMemTables.
 func TestMemTableAutoFreeze(t *testing.T) {
 	lsm := Open()
 	defer lsm.Close()
 
-	initialMem := lsm.inner.LsmStorageState.memtable
+	initialMem := lsm.inner.LsmStorageState.memTable
 	if initialMem == nil {
-		t.Fatal("Initial memtable should not be nil")
+		t.Fatal("Initial memTable should not be nil")
 	}
 
 	// Add key-value pairs to exceed the threshold (target_sst_size = 64)
@@ -132,21 +132,21 @@ func TestMemTableAutoFreeze(t *testing.T) {
 	}
 
 	// Wait briefly to allow background flush thread (if enabled) to run
-	// But we expect freeze to happen immediately on Put due to try_freeze()
-	newMem := lsm.inner.LsmStorageState.memtable
+	// But we expect freeze to happen immediately on Put due to tryFreeze()
+	newMem := lsm.inner.LsmStorageState.memTable
 
-	// Check that a new memtable was allocated (i.e., the old one was frozen)
+	// Check that a new memTable was allocated (i.e., the old one was frozen)
 	if newMem == initialMem {
 		t.Fatal("Memtable was not frozen after exceeding size limit")
 	}
 
-	// Check that the previous memtable is in imm_memtables
-	if len(lsm.inner.LsmStorageState.imm_memtables) != 1 {
-		t.Fatalf("Expected 1 imm_memtable, got %d", len(lsm.inner.LsmStorageState.imm_memtables))
+	// Check that the previous memTable is in immMemTables
+	if len(lsm.inner.LsmStorageState.immMemTables) != 1 {
+		t.Fatalf("Expected 1 imm_memtable, got %d", len(lsm.inner.LsmStorageState.immMemTables))
 	}
 
 	// Validate contents of the frozen imm_memtable
-	imm := lsm.inner.LsmStorageState.imm_memtables[0]
+	imm := lsm.inner.LsmStorageState.immMemTables[0]
 	for i := 0; i < 6; i++ {
 		key := []byte{byte('a' + i)}
 		expected := bytes.Repeat([]byte("v"), 10)

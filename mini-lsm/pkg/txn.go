@@ -28,6 +28,7 @@ type Transaction struct {
 func (txn *Transaction) get(key []byte) []byte {
 	localIter := NewTxnLocalIterator(txn.LocalStorage, NewKeyWithTS(key, TS_RANGE_BEGIN), NewKeyWithTS(key, TS_RANGE_END))
 
+	// step 1. build local storage iterator
 	if localIter.iter.Valid() && bytes.Compare(localIter.iter.Key().Key, key) == 0 {
 		return localIter.iter.Value()
 	}
@@ -37,20 +38,21 @@ func (txn *Transaction) get(key []byte) []byte {
 	txn.inner.state.RUnlock()
 	keyWithTs := NewKeyWithTS(CloneBytes(key), txn.ReadTS)
 
+	// step 2. build all memTable iterators
 	var allMemTableIters []StorageIterator
-	allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.memtable, keyWithTs, nil))
-	candidates := snapshot.imm_memtables
+	allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.memTable, keyWithTs, nil))
+	candidates := snapshot.immMemTables
 	for i := len(candidates) - 1; i >= 0; i-- {
-		allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.imm_memtables[i], keyWithTs, nil))
+		allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.immMemTables[i], keyWithTs, nil))
 	}
 
 	a := NewMergeIteratorFromBoundIterators(allMemTableIters)
 	keyHash := Hash(key)
 	// step 3. try to find key in level 0 sst
 	var l0SsTIters []StorageIterator
-	for i := len(snapshot.l0_sstables) - 1; i >= 0; i-- {
-		SsT := snapshot.sstables[snapshot.l0_sstables[i]]
-		if keyWithTs.Compare(SsT.FirstKey) < 0 || keyWithTs.Compare(SsT.LastKey) > 0 {
+	for i := len(snapshot.l0SSTables) - 1; i >= 0; i-- {
+		SsT := snapshot.sSTables[snapshot.l0SSTables[i]]
+		if bytes.Compare(key, SsT.FirstKey.Key) < 0 || bytes.Compare(key, SsT.LastKey.Key) > 0 {
 			continue
 		}
 
@@ -66,29 +68,29 @@ func (txn *Transaction) get(key []byte) []byte {
 
 	var l12MaxIters []StorageIterator
 	// step 4. try to find this key in level 1 - maxLevel
-outer:
 	for _, level := range snapshot.levels {
 		SsTableIDs := level.SSTables
 		left, right := 0, len(SsTableIDs)-1
-
+	bSearch:
 		for left <= right {
 			mid := (left + right) / 2
-			sst := snapshot.sstables[SsTableIDs[mid]]
+			sst := snapshot.sSTables[SsTableIDs[mid]]
+
 			switch {
-			case keyWithTs.Compare(sst.FirstKey) < 0:
+			case bytes.Compare(key, sst.FirstKey.Key) < 0:
 				right = mid - 1
-			case keyWithTs.Compare(sst.LastKey) > 0:
+			case bytes.Compare(key, sst.LastKey.Key) > 0:
 				left = mid + 1
 			default:
 				if !sst.BloomFilter.MayContain(keyHash) {
-					break outer
+					break bSearch
 				}
 
 				iter := CreateAndSeekToKey(sst, keyWithTs)
 				if iter != nil && iter.Valid() && bytes.Equal(iter.Key().Key, key) {
 					l12MaxIters = append(l12MaxIters, iter)
 				}
-				break outer
+				break bSearch
 			}
 		}
 	}
@@ -120,10 +122,10 @@ func (txn *Transaction) Scan(lower []byte, upper []byte) *TxnIterator {
 
 	// 2. all memTable iters from LSM
 	var allMemTableIters []StorageIterator
-	allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.memtable, lowerWithTS, nil))
-	candidates := snapshot.imm_memtables
+	allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.memTable, lowerWithTS, nil))
+	candidates := snapshot.immMemTables
 	for i := len(candidates) - 1; i >= 0; i-- {
-		allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.imm_memtables[i], lowerWithTS, nil))
+		allMemTableIters = append(allMemTableIters, NewBoundedMemTableIterator(snapshot.immMemTables[i], lowerWithTS, nil))
 	}
 
 	a := NewMergeIteratorFromBoundIterators(allMemTableIters)
@@ -131,9 +133,9 @@ func (txn *Transaction) Scan(lower []byte, upper []byte) *TxnIterator {
 	// 3. level 0 iters
 	L0SSTIters := make([]StorageIterator, 0)
 	// newest first
-	for i := len(snapshot.l0_sstables) - 1; i >= 0; i-- {
-		sstId := snapshot.l0_sstables[i]
-		ssTable := snapshot.sstables[sstId]
+	for i := len(snapshot.l0SSTables) - 1; i >= 0; i-- {
+		sstId := snapshot.l0SSTables[i]
+		ssTable := snapshot.sSTables[sstId]
 		if rangeOverlap(lower, upper, ssTable.FirstKey.Key, ssTable.LastKey.Key) {
 			iter := CreateAndSeekToKey(ssTable, lowerWithTS)
 			L0SSTIters = append(L0SSTIters, iter)
@@ -149,7 +151,7 @@ func (txn *Transaction) Scan(lower []byte, upper []byte) *TxnIterator {
 		SstIDs := level.SSTables
 		levelTables := make([]*SsTable, 0)
 		for _, tableID := range SstIDs {
-			Sst := snapshot.sstables[tableID]
+			Sst := snapshot.sSTables[tableID]
 			if rangeOverlap(lower, upper, Sst.FirstKey.Key, Sst.LastKey.Key) {
 				levelTables = append(levelTables, Sst)
 			}
@@ -181,8 +183,6 @@ func (txn *Transaction) Commit() error {
 
 	writeSet := txn.KeyHashes.set.WriteSet
 	readSet := txn.KeyHashes.set.ReadSet
-
-	// fmt.Printf("commit txn: write_set: %v, read_set: %v\n", writeSet, readSet)
 
 	// concat conflict check, to avoid this tnx read dirty data.
 	if len(writeSet) > 0 {
@@ -265,7 +265,7 @@ func (txn *Transaction) put(key, value []byte) {
 		if txn.KeyHashes.set.WriteSet == nil {
 			txn.KeyHashes.set.WriteSet = make(map[uint32]struct{})
 		}
-		hash := Hash(key)
+		hash := Hash(k)
 		txn.KeyHashes.set.WriteSet[hash] = struct{}{}
 	}
 }

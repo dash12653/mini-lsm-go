@@ -61,8 +61,8 @@ func (mvcc *LsmMvccInner) InsertCommittedTxn(ts uint64, data *CommittedTxnData) 
 }
 
 // LatestCommitTS returns the newest commit_ts
-func (m *LsmMvccInner) LatestCommitTS() uint64 {
-	return m.ts
+func (mvcc *LsmMvccInner) LatestCommitTS() uint64 {
+	return mvcc.ts
 }
 
 func (mvcc *LsmMvccInner) RemoveOlderThan(watermark uint64) {
@@ -85,27 +85,27 @@ func (mvcc *LsmMvccInner) RemoveOlderThan(watermark uint64) {
 }
 
 // UpdateCommitTS sets the newest timestamp
-func (m *LsmMvccInner) UpdateCommitTS(ts uint64) {
-	m.ts = ts
+func (mvcc *LsmMvccInner) UpdateCommitTS(ts uint64) {
+	mvcc.ts = ts
 }
 
 // Watermark returns the lowest safe timestamp
-func (m *LsmMvccInner) Watermark() uint64 {
-	m.tsLock.Lock()
-	defer m.tsLock.Unlock()
-	if ts, found := m.watermark.Watermark(); ts != nil && found {
+func (mvcc *LsmMvccInner) Watermark() uint64 {
+	mvcc.tsLock.Lock()
+	defer mvcc.tsLock.Unlock()
+	if ts, found := mvcc.watermark.Watermark(); ts != nil && found {
 		return *ts
 	}
-	return m.ts
+	return mvcc.ts
 }
 
 // NewTxn creates a new transaction
-func (m *LsmMvccInner) NewTxn(inner *LsmStorageInner, serializable bool) *Transaction {
-	m.tsLock.Lock()
-	m.ts++
-	readTs := m.ts
-	m.watermark.AddReader(readTs)
-	m.tsLock.Unlock()
+func (mvcc *LsmMvccInner) NewTxn(inner *LsmStorageInner, serializable bool) *Transaction {
+	mvcc.tsLock.Lock()
+	mvcc.ts++
+	readTs := mvcc.ts
+	mvcc.watermark.AddReader(readTs)
+	mvcc.tsLock.Unlock()
 
 	txn := &Transaction{
 		inner:        inner,

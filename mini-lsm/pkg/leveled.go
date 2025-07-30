@@ -34,12 +34,12 @@ func (c *LeveledCompactionController) FindOverlappingSsts(
 	inLevel uint,
 ) []uint {
 	// Step 1: Determine the overall key range [beginKey, endKey] from input SSTables
-	beginKey := snapshot.sstables[sstIDs[0]].FirstKey
-	endKey := snapshot.sstables[sstIDs[0]].LastKey
+	beginKey := snapshot.sSTables[sstIDs[0]].FirstKey
+	endKey := snapshot.sSTables[sstIDs[0]].LastKey
 
 	for _, id := range sstIDs[1:] {
-		fk := snapshot.sstables[id].FirstKey
-		lk := snapshot.sstables[id].LastKey
+		fk := snapshot.sSTables[id].FirstKey
+		lk := snapshot.sSTables[id].LastKey
 
 		if fk.Compare(beginKey) < 0 {
 			beginKey = fk
@@ -52,7 +52,7 @@ func (c *LeveledCompactionController) FindOverlappingSsts(
 	// Step 2: Collect SSTables in the target level that overlap with [beginKey, endKey]
 	var overlapSSTs []uint
 	for _, sstID := range snapshot.levels[inLevel-1].SSTables {
-		sst := snapshot.sstables[sstID]
+		sst := snapshot.sSTables[sstID]
 		firstKey := sst.FirstKey
 		lastKey := sst.LastKey
 
@@ -72,14 +72,13 @@ func (c *LeveledCompactionController) GenerateCompactionTask(snapshot *LsmStorag
 	for i := 0; i < c.options.MaxLevels; i++ {
 		totalSize := 0
 		for _, sstID := range snapshot.levels[i].SSTables {
-			sst := snapshot.sstables[sstID]
-			// todo: size?
+			sst := snapshot.sSTables[sstID]
 			totalSize += int(sst.File.Size)
 		}
 		realLevelSize = append(realLevelSize, totalSize)
 	}
 
-	baseLevelSizeBytes := c.options.BaseLevelSizeMb * 1024
+	baseLevelSizeBytes := c.options.BaseLevelSizeMb * 1024 * 1024
 
 	last := c.options.MaxLevels - 1
 	if realLevelSize[last] > baseLevelSizeBytes {
@@ -101,13 +100,13 @@ func (c *LeveledCompactionController) GenerateCompactionTask(snapshot *LsmStorag
 		}
 	}
 
-	if len(snapshot.l0_sstables) >= c.options.Level0FileNumCompactionTrigger {
+	if len(snapshot.l0SSTables) >= c.options.Level0FileNumCompactionTrigger {
 		// fmt.Printf("flush L0 SST to base level %d\n", baseLevel)
 		return &LeveledCompactionTask{
-			UpperLevel:              nil,                                          // None表示L0
-			UpperLevelSstIds:        append([]uint(nil), snapshot.l0_sstables...), // clone
+			UpperLevel:              nil,                                         // None表示L0
+			UpperLevelSstIds:        append([]uint(nil), snapshot.l0SSTables...), // clone
 			LowerLevel:              baseLevel,
-			LowerLevelSstIds:        c.FindOverlappingSsts(snapshot, snapshot.l0_sstables, uint(baseLevel)),
+			LowerLevelSstIds:        c.FindOverlappingSsts(snapshot, snapshot.l0SSTables, uint(baseLevel)),
 			IsLowerLevelBottomLevel: baseLevel == c.options.MaxLevels,
 		}
 	}
@@ -168,17 +167,17 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 
 	// Delete SST metadata (always), and delete file (only if not in recovery)
 	deleteSST := func(id uint) {
-		tbl, ok := storage.LsmStorageState.sstables[id]
+		tbl, ok := storage.LsmStorageState.sSTables[id]
 		if !ok {
 			return
 		}
 		if !inRecovery {
-			fileName := storage.path_of_sst(tbl.ID)
+			fileName := storage.pathOfSst(tbl.ID)
 			if err := os.Remove(fileName); err != nil {
 				fmt.Println("file delete failure:", err)
 			}
 		}
-		delete(storage.LsmStorageState.sstables, id)
+		delete(storage.LsmStorageState.sSTables, id)
 	}
 
 	// Delete upper and lower level SSTs from metadata (and optionally file)
@@ -197,12 +196,12 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 		for _, id := range task.UpperLevelSstIds {
 			toDelete[id] = struct{}{}
 		}
-		for _, id := range storage.LsmStorageState.l0_sstables {
+		for _, id := range storage.LsmStorageState.l0SSTables {
 			if _, ok := toDelete[id]; !ok {
 				remain = append(remain, id)
 			}
 		}
-		storage.LsmStorageState.l0_sstables = remain
+		storage.LsmStorageState.l0SSTables = remain
 	} else {
 		level := *task.UpperLevel - 1
 		remain := make([]uint, 0)
@@ -235,7 +234,7 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 	// Merge new SSTs into lower level
 	oldSSTs := remain
 	get := func(id uint) *SsTable {
-		return storage.LsmStorageState.sstables[id]
+		return storage.LsmStorageState.sSTables[id]
 	}
 	merged := make([]uint, 0, len(oldSSTs)+len(newSSTs))
 	i, j := 0, 0
@@ -247,7 +246,7 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 			merged = append(merged, old.ID)
 			i++
 		} else {
-			storage.LsmStorageState.sstables[newSst.ID] = newSst
+			storage.LsmStorageState.sSTables[newSst.ID] = newSst
 			merged = append(merged, newSst.ID)
 			j++
 		}
@@ -257,7 +256,7 @@ func (c *LeveledCompactionController) ApplyCompactionResult(
 	}
 	for ; j < len(newSSTs); j++ {
 		newSst := newSSTs[j]
-		storage.LsmStorageState.sstables[newSst.ID] = newSst
+		storage.LsmStorageState.sSTables[newSst.ID] = newSst
 		merged = append(merged, newSst.ID)
 	}
 

@@ -4,31 +4,25 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/huandu/skiplist"
+	"github.com/INLOpen/skiplist"
 	"path/filepath"
 )
 
 // MemTable wrapper of skip list
-// todo: it's not thread-safe, need to substitute it with a thread-safe skip-list implementation.
 type MemTable struct {
-	Map             *skiplist.SkipList // skip list
-	wal             *Wal               // Wal
-	id              uint               // id of this MemTable
-	ApproximateSize uint               // approximate size
+	Map             *skiplist.SkipList[[]byte, []byte] // skipMap
+	wal             *Wal                               // Wal
+	id              uint                               // id of this MemTable
+	ApproximateSize uint                               // approximate size
 }
 
-type ByteSliceComparator struct{}
-
-func (c *ByteSliceComparator) Compare(lhs, rhs interface{}) int {
-	a := lhs.([]byte)
-	b := rhs.([]byte)
-
-	l, err := DecodeKey(a)
+func keyComparator(lhs, rhs []byte) int {
+	l, err := DecodeKey(lhs)
 	if err != nil {
 		panic(err)
 	}
 
-	r, err := DecodeKey(b)
+	r, err := DecodeKey(rhs)
 	if err != nil {
 		panic(err)
 	}
@@ -36,16 +30,10 @@ func (c *ByteSliceComparator) Compare(lhs, rhs interface{}) int {
 	return l.Compare(&r)
 }
 
-func (c *ByteSliceComparator) CalcScore(key interface{}) float64 {
-	// use key's length as score
-	k := key.([]byte)
-	return float64(len(k))
-}
-
 // NewMemTable initialize an empty skiplist and return.
 func NewMemTable(id uint) *MemTable {
 	return &MemTable{
-		Map: skiplist.New(&ByteSliceComparator{}),
+		Map: skiplist.NewWithComparator[[]byte, []byte](keyComparator),
 		id:  id,
 	}
 }
@@ -58,16 +46,16 @@ func NewMemTableWithWal(id uint, path string) *MemTable {
 		panic(err)
 	}
 	return &MemTable{
-		Map: skiplist.New(&ByteSliceComparator{}),
+		Map: skiplist.NewWithComparator[[]byte, []byte](keyComparator),
 		wal: wal,
 		id:  id,
 	}
 }
 
-// RecoverFromWal creates a memtable from Wal.
+// RecoverFromWal creates a memTable from Wal.
 func (m *MemTable) RecoverFromWal(id uint, path string) *MemTable {
 	fileName := filepath.Join(path, fmt.Sprintf("%05d.wal", id))
-	m.Map = skiplist.New(&ByteSliceComparator{})
+	m.Map = skiplist.NewWithComparator[[]byte, []byte](keyComparator)
 	wal, approximateSize, err := RecoverSkipList(fileName, m.Map)
 	if err != nil {
 		panic(err)
@@ -91,7 +79,7 @@ func CloneBytes(b []byte) []byte {
 	return cp
 }
 
-// Put puts a key-value pair into the memtable
+// Put puts a key-value pair into the memTable
 func (mt *MemTable) Put(key *Key, value []byte) {
 	k, v := CloneBytes(key.Encode()), CloneBytes(value)
 	if mt.wal != nil {
@@ -100,32 +88,35 @@ func (mt *MemTable) Put(key *Key, value []byte) {
 			panic(err)
 		}
 	}
-	mt.Map.Set(k, v)
+	mt.Map.Insert(k, v)
 	estimatedSize := len(k) + len(v)
 	mt.ApproximateSize += uint(estimatedSize)
 }
 
-//// Get gets key's corresponding value
-//func (mt *MemTable) Get(key *Key) ([]byte, bool) {
-//	ele := mt.Map.Get(key)
-//	if ele != nil {
-//		return ele.Value.([]byte), true
-//	}
-//	return nil, false
-//}
-
 // Get gets key's corresponding value
 func (mt *MemTable) Get(key *Key) ([]byte, bool) {
-	newKey := NewKey()
-	newKey.SetFromSlice(key)
-	ele := mt.Map.Find(newKey)
-	found, err := DecodeKey(ele.Key().([]byte))
-	if err != nil {
-		panic(err)
+	var foundKey *Key
+	var foundVal []byte
+	found := false
+
+	mt.Map.Range(func(k []byte, v []byte) bool {
+		currentKey, err := DecodeKey(k)
+		if err != nil {
+			panic(err)
+		}
+		if currentKey.Compare(key) >= 0 {
+			foundKey = &currentKey
+			foundVal = CloneBytes(v)
+			found = true
+			return false // stop range
+		}
+		return true
+	})
+
+	if bytes.Compare(foundKey.Key, key.Key) == 0 {
+		return foundVal, found
 	}
-	if ele != nil && bytes.Compare(key.Key, found.Key) == 0 {
-		return CloneBytes(ele.Value.([]byte)), true
-	}
+
 	return nil, false
 }
 
@@ -134,16 +125,19 @@ func (mt *MemTable) Len() uint {
 }
 
 func (mt *MemTable) Flush(builder *SsTableBuilder) {
-	for node := mt.Map.Front(); node != nil; node = node.Next() {
-		fullKey, err := DecodeKey(node.Key().([]byte))
+	mt.Map.Range(func(k []byte, v []byte) bool {
+		fullKey, err := DecodeKey(k)
 		if err != nil {
 			panic(err)
 		}
-		builder.add(&fullKey, node.Value.([]byte))
-	}
+		builder.add(&fullKey, v)
+		return true // keep traversing
+	})
+
 	if builder.firstKey != nil {
 		builder.finishBlock()
 	}
+
 	return
 }
 
@@ -154,32 +148,26 @@ type StorageIterator interface {
 	Valid() bool
 }
 
-// Unified iterator with optional lower/upper bounds
 type BoundedMemTableIterator struct {
-	list       *skiplist.SkipList
-	node       *skiplist.Element
+	sklIter    *skiplist.Iterator[[]byte, []byte]
 	upperBound *Key
 	valid      bool
 }
 
-func NewBoundedMemTableIterator(mt *MemTable, start *Key, upper *Key) *BoundedMemTableIterator {
-	var node *skiplist.Element
-	if start == nil {
-		node = mt.Map.Front()
-	} else {
-		node = mt.Map.Find(start.Encode())
+func NewBoundedMemTableIterator(mt *MemTable, lower *Key, upper *Key) *BoundedMemTableIterator {
+	sklIter := mt.Map.NewIterator()
+	if lower != nil {
+		sklIter.Seek(lower.Encode())
 	}
 
 	iter := &BoundedMemTableIterator{
-		list:       mt.Map,
-		node:       node,
+		sklIter:    sklIter,
 		upperBound: upper,
-		valid:      node != nil,
+		valid:      sklIter.Next(), // first valid or invalid key that's ge than lower
 	}
 
 	if iter.valid && upper != nil && iter.Key().Compare(upper) > 0 {
 		iter.valid = false
-		iter.node = nil
 	}
 
 	return iter
@@ -193,34 +181,43 @@ func (it *BoundedMemTableIterator) Key() *Key {
 	if !it.valid {
 		return nil
 	}
-	k := it.node.Key().([]byte)
-	k2, err := DecodeKey(k)
+	rawKey := it.sklIter.Key()
+	key, err := DecodeKey(rawKey)
 	if err != nil {
 		panic(err)
 	}
-	return &k2
+	return &key
 }
 
 func (it *BoundedMemTableIterator) Value() []byte {
 	if !it.valid {
 		return nil
 	}
-	return it.node.Value.([]byte)
+	return it.sklIter.Value()
 }
 
 func (it *BoundedMemTableIterator) Next() error {
 	if !it.valid {
 		return errors.New("iterator is not valid")
 	}
-	it.node = it.node.Next()
-	if it.node == nil || len(it.node.Key().([]byte)) == 0 {
+
+	ok := it.sklIter.Next()
+	// invalid
+	if !ok || it.sklIter.Key() == nil || len(it.sklIter.Key()) == 0 {
 		it.valid = false
 		return nil
 	}
-	if it.upperBound != nil && it.Key().Compare(it.upperBound) > 0 {
-		it.valid = false
-		it.node = nil
+
+	// valid
+	currentKey, err := DecodeKey(it.sklIter.Key())
+	if err != nil {
+		panic(err)
 	}
+
+	if it.upperBound != nil && currentKey.Compare(it.upperBound) > 0 {
+		it.valid = false
+	}
+
 	return nil
 }
 

@@ -124,7 +124,6 @@ func (iter *BlockIterator) seekToOffset(offset uint) error {
 	keyOverlapLen := binary.BigEndian.Uint16(data[:2])
 	remainingKeyLen := binary.BigEndian.Uint16(data[2:4])
 	cursor := 4
-
 	// overlap len + remain len + ts + value len
 	if len(data) < cursor+int(remainingKeyLen)+8+2 {
 		return fmt.Errorf("invalid entry: incomplete key/timestamp/value length")
@@ -132,8 +131,8 @@ func (iter *BlockIterator) seekToOffset(offset uint) error {
 
 	// 2. Reconstruct the full key using FirstKey and remaining part
 	fullKey := make([]byte, keyOverlapLen+remainingKeyLen)
-	copy(fullKey, iter.block.getFirstKey().Key[:keyOverlapLen])               // copy prefix from firstKey
-	copy(fullKey[keyOverlapLen:], data[cursor:(cursor+int(remainingKeyLen))]) // copy remaining key bytes
+	copy(fullKey, iter.block.getFirstKey().Key[:keyOverlapLen])                  // copy prefix from firstKey
+	copy(fullKey[keyOverlapLen:], data[cursor:(uint16(cursor)+remainingKeyLen)]) // copy remaining key bytes
 	cursor += int(remainingKeyLen)
 
 	// 3. Decode timestamp

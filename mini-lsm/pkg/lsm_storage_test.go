@@ -15,10 +15,10 @@ func int64ToKey(n int64) []byte {
 func newTestStorageWithOptions(targetSize uint) *LsmStorageInner {
 	return &LsmStorageInner{
 		LsmStorageState: &LsmStorageState{
-			memtable:      NewMemTable(0),
-			imm_memtables: []*MemTable{},
-			l0_sstables:   []uint{},
-			id:            1,
+			memTable:     NewMemTable(0),
+			immMemTables: []*MemTable{},
+			l0SSTables:   []uint{},
+			id:           1,
 		},
 		Options: &LsmStorageOptions{
 			target_sst_size: targetSize,
@@ -47,13 +47,13 @@ func TestGetFromImmutable(t *testing.T) {
 	storage.Put(int64ToKey(2), []byte("bbb")) // exceed size -> freeze
 	storage.Put(int64ToKey(3), []byte("ccc"))
 
-	if len(storage.LsmStorageState.imm_memtables) == 0 {
-		t.Fatal("Expected at least one immutable memtable after freeze")
+	if len(storage.LsmStorageState.immMemTables) == 0 {
+		t.Fatal("Expected at least one immutable memTable after freeze")
 	}
 
 	got, ok := storage.Get(int64ToKey(1))
 	if !ok || string(got) != "aaa" {
-		t.Errorf("Expected to get 'aaa' from immutable memtable, got '%s'", string(got))
+		t.Errorf("Expected to get 'aaa' from immutable memTable, got '%s'", string(got))
 	}
 }
 
@@ -79,8 +79,8 @@ func TestTryFreeze(t *testing.T) {
 	storage.Put(int64ToKey(1), []byte("12345"))
 	storage.Put(int64ToKey(2), []byte("67890"))
 
-	if len(storage.LsmStorageState.imm_memtables) == 0 {
-		t.Fatal("Expected memtable to be frozen after threshold exceeded")
+	if len(storage.LsmStorageState.immMemTables) == 0 {
+		t.Fatal("Expected memTable to be frozen after threshold exceeded")
 	}
 }
 

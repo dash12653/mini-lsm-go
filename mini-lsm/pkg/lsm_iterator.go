@@ -24,7 +24,7 @@ func NewLsmIterator(inner *TwoMergeIterator, endBound *Key, readTs uint64) *LsmI
 	return iter
 }
 
-// moveToNextValid 实现完整版本跳过逻辑
+// moveToNextValid skips invalid or invisible versions and positions at the next valid entry.
 func (it *LsmIterator) moveToNextValid() {
 	for {
 		if !it.inner.Valid() {
@@ -34,40 +34,40 @@ func (it *LsmIterator) moveToNextValid() {
 
 		curKey := it.inner.Key()
 
-		// 右闭区间判断
-		if it.endBound != nil && curKey.Compare(it.endBound) > 0 {
+		// Right-closed range: stop if user key > endBound
+		if it.endBound != nil && bytes.Compare(curKey.Key, it.endBound.Key) > 0 {
 			it.isValid = false
 			return
 		}
 
 		userKey, ts := curKey.Key, curKey.TS
 
-		// 时间戳比 readTs 新，跳过
+		// Skip if the version is newer than readTs
 		if ts > it.readTs {
 			it.inner.Next()
 			continue
 		}
 
-		// 空值（tombstone），需要跳过整个 user key 的所有旧版本
+		// Skip all historical versions of a deleted (tombstone) key
 		if len(it.inner.Value()) == 0 {
 			it.skipCurrentUserKey(userKey)
 			continue
 		}
 
-		// 去重：已经访问过该 key
+		// Deduplication: already visited this user key
 		if it.prevKey != nil && bytes.Equal(userKey, it.prevKey) {
 			it.inner.Next()
 			continue
 		}
 
-		// 合法 key
+		// Valid key found
 		it.prevKey = CloneBytes(userKey)
 		it.isValid = true
 		return
 	}
 }
 
-// skipCurrentUserKey 跳过当前 user key 的所有历史版本
+// skipCurrentUserKey skips all versions of the given user key
 func (it *LsmIterator) skipCurrentUserKey(target []byte) {
 	for it.inner.Valid() {
 		if !bytes.Equal(it.inner.Key().Key, target) {
@@ -76,8 +76,6 @@ func (it *LsmIterator) skipCurrentUserKey(target []byte) {
 		it.inner.Next()
 	}
 }
-
-// Public API
 
 func (it *LsmIterator) Valid() bool {
 	return it.isValid
